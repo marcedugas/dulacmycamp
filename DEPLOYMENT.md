@@ -124,10 +124,12 @@ emails are dead, with nothing failing anywhere else.
       logging messages.
 - [x] **Rate limiting on `/auth/request-otp`** — 1/60s per email, 5/10min per
       IP. See the Rate limiting section in the README.
-- [ ] **Confirm `recoresystems.net` is verified in Resend.** If the domain is
-      not verified, Resend rejects every send and the fire-and-forget spawn
-      only logs it — the app looks healthy while no mail arrives. Check with
-      `railway logs --service dulacmycamp-api | grep 'email send failed'`.
+- [x] **`recoresystems.net` verified in Resend** — confirmed 2026-09-04 by a
+      live send that Resend accepted (`email sent` in the API log). If mail
+      ever stops arriving, check for the opposite line: sends are
+      fire-and-forget, so a rejection only shows up in the log while the app
+      itself keeps looking healthy.
+      `railway logs --service dulacmycamp-api | grep 'email send failed'`
 - [ ] Replace placeholder photos, house rules and amenities in
       `apps/web/src/routes/Landing.tsx` (marked `TODO(content)`).
 - [ ] Consider a custom domain.
