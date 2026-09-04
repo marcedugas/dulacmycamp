@@ -122,11 +122,10 @@ emails are dead, with nothing failing anywhere else.
       `is_owner` flag on user accounts (admin panel → Users tab), seeded by
       migration `0004` onto `jldugas@eatel.net`. `OWNER_EMAIL` is now only a
       bootstrap fallback for a database with no owner flagged.
-- [ ] **Correct or clear `OWNER_EMAIL` in Railway.** It currently holds
-      `jeanldugas@eatel.net`, which is a typo — the real mailbox is
-      `jldugas@eatel.net`. Nothing reads it while an owner is flagged, so this
-      is no longer urgent, but a wrong fallback is worse than none:
-      `railway variables --service dulacmycamp-api --set OWNER_EMAIL=jldugas@eatel.net`
+- [x] **Corrected `OWNER_EMAIL` in Railway** — set 2026-09-04 to
+      `jldugas@eatel.net`, replacing the typo `jeanldugas@eatel.net`. Only
+      matters as the no-owner-flagged fallback now, but a wrong fallback is
+      worse than none.
 - [x] **`RESEND_API_KEY` + `EMAIL_FROM_ADDRESS`** — set 2026-09-04, sending as
       `camp@recoresystems.net`. Mail is live; the API no longer falls back to
       logging messages.
