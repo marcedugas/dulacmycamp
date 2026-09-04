@@ -1,0 +1,112 @@
+@import 'tailwindcss';
+
+/*
+ * Rustic outdoor palette. Named after what they are rather than by hue so the
+ * intent survives a future retheme: forest = primary, wood = secondary,
+ * bayou = accent, cream = ground, charcoal = ink.
+ */
+@theme {
+  --color-forest-50: #f1f6f0;
+  --color-forest-100: #dfeadd;
+  --color-forest-200: #c0d6bc;
+  --color-forest-300: #96bb90;
+  --color-forest-400: #6a9c63;
+  --color-forest-500: #477d40;
+  --color-forest-600: #2d5a27;
+  --color-forest-700: #254a21;
+  --color-forest-800: #1f3c1c;
+  --color-forest-900: #1a3117;
+
+  --color-wood-50: #faf6f1;
+  --color-wood-100: #f2e8dc;
+  --color-wood-200: #e3d0b9;
+  --color-wood-300: #d0b28e;
+  --color-wood-400: #b98a5f;
+  --color-wood-500: #a06f45;
+  --color-wood-600: #8b5e3c;
+  --color-wood-700: #714b31;
+  --color-wood-800: #5c3e2b;
+  --color-wood-900: #4c3425;
+
+  --color-bayou-50: #eef8f6;
+  --color-bayou-100: #d3ede8;
+  --color-bayou-200: #a9dbd2;
+  --color-bayou-300: #76c1b5;
+  --color-bayou-400: #48a396;
+  --color-bayou-500: #2d7d6f;
+  --color-bayou-600: #26685d;
+  --color-bayou-700: #22544d;
+  --color-bayou-800: #1f443f;
+  --color-bayou-900: #1c3935;
+
+  --color-cream: #faf7f2;
+  --color-cream-dark: #efe9df;
+  --color-sand: #ddd2c2;
+  --color-charcoal: #1a1a1a;
+  --color-muted: #6b6255;
+  --color-clay: #9b3226;
+
+  --font-display: 'Bitter', Georgia, 'Times New Roman', serif;
+  --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background-color: var(--color-cream);
+    color: var(--color-charcoal);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: var(--font-display);
+  }
+
+  /* Focus ring that reads on both cream and charcoal grounds. */
+  :focus-visible {
+    outline: 2px solid var(--color-forest-500);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  /*
+   * Faint vertical grain, used on the nav and the hero. Two low-alpha
+   * repeating gradients cost nothing and avoid shipping a texture image.
+   */
+  .wood-grain {
+    background-image:
+      repeating-linear-gradient(
+        90deg,
+        rgba(255, 255, 255, 0.022) 0px,
+        rgba(255, 255, 255, 0.022) 1px,
+        transparent 1px,
+        transparent 4px
+      ),
+      repeating-linear-gradient(
+        90deg,
+        rgba(0, 0, 0, 0.14) 0px,
+        rgba(0, 0, 0, 0.14) 2px,
+        transparent 2px,
+        transparent 11px
+      );
+  }
+
+  /* Blackout cells: unmistakable at a glance, quiet in the grid. */
+  .stripe-blackout {
+    background-image: repeating-linear-gradient(
+      45deg,
+      var(--color-sand) 0px,
+      var(--color-sand) 5px,
+      transparent 5px,
+      transparent 10px
+    );
+  }
+}

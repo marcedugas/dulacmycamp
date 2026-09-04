@@ -1,0 +1,13 @@
+# Railway service: dulacmycamp-web
+# Set the service's root directory to `apps/web` in the Railway dashboard, and
+# set VITE_API_URL to the public URL of the API service before building —
+# Vite inlines it at build time, so changing it needs a redeploy.
+
+[build]
+builder = "nixpacks"
+buildCommand = "pnpm install --frozen-lockfile=false && pnpm build"
+
+[deploy]
+startCommand = "pnpm exec serve -s dist -l $PORT"
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 5
