@@ -410,16 +410,17 @@ function AmenitiesSection() {
                     if (label && label !== a.label) update.mutate({ ...a, label });
                   }}
                 />
-                <Input
-                  defaultValue={a.icon ?? ''}
-                  list="amenity-icon-names"
-                  placeholder="Icon name"
-                  className="w-36"
-                  onBlur={(e) => {
-                    const icon = e.target.value.trim() || null;
-                    if (icon !== a.icon) update.mutate({ ...a, icon });
-                  }}
-                />
+                <div className="w-36">
+                  <Input
+                    defaultValue={a.icon ?? ''}
+                    list="amenity-icon-names"
+                    placeholder="Icon name"
+                    onBlur={(e) => {
+                      const icon = e.target.value.trim() || null;
+                      if (icon !== a.icon) update.mutate({ ...a, icon });
+                    }}
+                  />
+                </div>
                 <button
                   onClick={() => remove.mutate(a.id)}
                   title="Delete"
@@ -453,13 +454,14 @@ function AmenitiesSection() {
           placeholder="Amenity, e.g. Wi-Fi & TV"
           className="flex-1"
         />
-        <Input
-          value={draft.icon}
-          onChange={(e) => setDraft((d) => ({ ...d, icon: e.target.value }))}
-          list="amenity-icon-names"
-          placeholder="Icon name"
-          className="w-36"
-        />
+        <div className="w-36">
+          <Input
+            value={draft.icon}
+            onChange={(e) => setDraft((d) => ({ ...d, icon: e.target.value }))}
+            list="amenity-icon-names"
+            placeholder="Icon name"
+          />
+        </div>
         <Button type="submit" size="sm" disabled={create.isPending || !draft.label.trim()}>
           <Plus size={14} /> Add
         </Button>
