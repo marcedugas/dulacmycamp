@@ -169,10 +169,29 @@ covered by unit tests, including a cross-check against the published September
 - [ ] **Confirm capacity** — `CAPACITY_ADULTS` defaults to 6.
 - [ ] Decide whether guests may see each other's names (today: never).
 
+## Rate limiting
+
+`POST /auth/request-otp` is the only public, unauthenticated endpoint that
+spends money — every accepted call sends an email. It is throttled twice:
+
+| Limit | Window | Why |
+|---|---|---|
+| 1 per email address | 60s | Stops one inbox being flooded with codes |
+| 5 per client IP | 10 min | Caps spend; an attacker cycling addresses walks past a per-email limit |
+
+Over the limit returns `429` with a message the login form shows as-is.
+Code *entry* (`/auth/verify-otp`) is deliberately not throttled — that would
+let anyone lock a guest out of their own account.
+
+The counters are in-process (`src/rate_limit.rs`), which is a deliberate
+trade-off: no Redis to operate, but limits reset on deploy and are per-replica.
+Fine as a cost guard on a single-replica service; it would not be enough for
+anything security-critical.
+
 ## Not built
 
-Rate limiting on `/auth/request-otp`, and any automated test above the unit
-level on the API. Both are worth adding before this is public.
+Any automated test above the unit level on the API — no integration suite
+spins up Postgres and exercises the HTTP paths. Worth adding.
 
 ---
 

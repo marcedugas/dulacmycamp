@@ -8,12 +8,13 @@ use crate::{
     ApiResult, AppError, Shared,
     email::{self},
     email_templates,
+    rate_limit::client_ip,
     users::{self, USER_COLUMNS, User},
 };
 use axum::{
     Json,
-    extract::{FromRequestParts, State},
-    http::{header::AUTHORIZATION, request::Parts},
+    extract::{ConnectInfo, FromRequestParts, State},
+    http::{HeaderMap, header::AUTHORIZATION, request::Parts},
 };
 use chrono::{Duration, Utc};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
@@ -154,11 +155,33 @@ pub struct MessageResponse {
 
 pub async fn request_otp(
     State(state): State<Shared>,
+    headers: HeaderMap,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     Json(body): Json<RequestOtp>,
 ) -> ApiResult<Json<MessageResponse>> {
     let email = body.email.trim().to_lowercase();
     if !email.contains('@') || email.len() < 5 {
         return Err(AppError::BadRequest("Enter a valid email address.".into()));
+    }
+
+    // This endpoint is public, unauthenticated, and spends money on every
+    // accepted call, so it is throttled before it touches the database or
+    // the mail provider. The IP limit is what caps spend — an attacker
+    // cycling through addresses walks straight past a per-email limit.
+    let ip = client_ip(&headers, Some(peer));
+    if let Err(retry) = state.limits.otp_per_ip.check(&ip) {
+        tracing::warn!(%retry, "otp request rate limited by ip");
+        return Err(AppError::TooManyRequests(format!(
+            "Too many login attempts from this network. Try again in {} minute{}.",
+            retry.div_ceil(60),
+            if retry.div_ceil(60) == 1 { "" } else { "s" },
+        )));
+    }
+    if let Err(retry) = state.limits.otp_per_email.check(&email) {
+        tracing::debug!(%retry, "otp request rate limited by email");
+        return Err(AppError::TooManyRequests(format!(
+            "We just sent a code to that address. Check your inbox, or try again in {retry} seconds."
+        )));
     }
 
     // Self-registration: first code request creates the guest account.

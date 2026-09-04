@@ -118,24 +118,21 @@ emails are dead, with nothing failing anywhere else.
 
 ## Still to do before real guests use it
 
-- [ ] **`OWNER_EMAIL` → `jeanldugas@eatel.net`.** Currently
-      `laihafloyd@gmail.com` as a stand-in.
-      `railway variables --service dulacmycamp-api --set OWNER_EMAIL=jeanldugas@eatel.net`
-- [ ] **`RESEND_API_KEY` + `EMAIL_FROM_ADDRESS`.** Both unset, so **no email is
-      being sent at all** — the API logs the message instead. Login codes are
-      readable with `railway logs --service dulacmycamp-api`, which is fine for
-      testing and useless for guests. Needs a verified sending domain in Resend.
-- [ ] Rate-limit `/auth/request-otp`. It is public, unauthenticated, and sends
-      mail — the obvious thing to abuse once mail is switched on.
+- [x] **`OWNER_EMAIL` → `jeanldugas@eatel.net`** — set 2026-09-04.
+- [x] **`RESEND_API_KEY` + `EMAIL_FROM_ADDRESS`** — set 2026-09-04, sending as
+      `camp@recoresystems.net`. Mail is live; the API no longer falls back to
+      logging messages.
+- [x] **Rate limiting on `/auth/request-otp`** — 1/60s per email, 5/10min per
+      IP. See the Rate limiting section in the README.
+- [ ] **Confirm `recoresystems.net` is verified in Resend.** If the domain is
+      not verified, Resend rejects every send and the fire-and-forget spawn
+      only logs it — the app looks healthy while no mail arrives. Check with
+      `railway logs --service dulacmycamp-api | grep 'email send failed'`.
 - [ ] Replace placeholder photos, house rules and amenities in
       `apps/web/src/routes/Landing.tsx` (marked `TODO(content)`).
 - [ ] Consider a custom domain.
-- [ ] **Remove the test account** `prod-check@example.com` — created while
-      verifying the live OTP endpoint from a browser. It is an empty guest row
-      with no bookings. There is no user-delete endpoint in the API, and
-      `railway connect Postgres` needs an SSH key registered on the account
-      (`railway ssh keys add`), so it was left in place rather than changing
-      account security settings. Harmless, but it shows in the admin Users tab.
+- [x] **Removed the test account** `prod-check@example.com` — created while
+      verifying the live OTP endpoint from a browser.
 
 ## Operations
 

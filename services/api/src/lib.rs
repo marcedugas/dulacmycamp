@@ -11,6 +11,7 @@ pub mod email;
 pub mod email_templates;
 pub mod events;
 pub mod notifications;
+pub mod rate_limit;
 pub mod users;
 pub mod weather;
 
@@ -105,6 +106,7 @@ pub struct AppState {
     pub cfg: Config,
     pub http: reqwest::Client,
     pub cache: Caches,
+    pub limits: rate_limit::RateLimits,
 }
 
 pub type Shared = Arc<AppState>;
@@ -130,6 +132,7 @@ pub async fn build_state(cfg: Config) -> anyhow::Result<Shared> {
         cfg,
         http,
         cache: Caches::default(),
+        limits: rate_limit::RateLimits::default(),
     }))
 }
 
@@ -239,6 +242,8 @@ pub enum AppError {
     NotFound(String),
     #[error("{0}")]
     Conflict(String),
+    #[error("{0}")]
+    TooManyRequests(String),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -251,6 +256,7 @@ impl AppError {
             Self::Forbidden(_) => (StatusCode::FORBIDDEN, "FORBIDDEN"),
             Self::NotFound(_) => (StatusCode::NOT_FOUND, "NOT_FOUND"),
             Self::Conflict(_) => (StatusCode::CONFLICT, "CONFLICT"),
+            Self::TooManyRequests(_) => (StatusCode::TOO_MANY_REQUESTS, "TOO_MANY_REQUESTS"),
             Self::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL"),
         }
     }
