@@ -26,13 +26,18 @@ RUN touch src/main.rs src/lib.rs && cargo build --release
 FROM debian:bookworm-slim
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates \
+ && apt-get install -y --no-install-recommends ca-certificates util-linux \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --system --create-home --uid 10001 camp
 
 COPY --from=builder /build/target/release/dulacmycamp-api /usr/local/bin/dulacmycamp-api
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-USER camp
+# Deliberately no USER here — the entrypoint starts as root (needed to chown
+# the mounted upload volume) and drops to `camp` itself via setpriv before
+# the app ever runs. See docker-entrypoint.sh.
 ENV BIND_ADDR=0.0.0.0:8080
 EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["dulacmycamp-api"]
