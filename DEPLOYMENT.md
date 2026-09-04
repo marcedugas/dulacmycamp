@@ -59,23 +59,39 @@ Set with `railway api` (`serviceInstanceUpdate`), not from a file.
 | Setting | Value |
 |---|---|
 | Root directory | `/` (repo root) |
-| Builder | Nixpacks |
+| Builder | Railpack |
 | Build command | `pnpm --filter @dulacmycamp/web build` |
-| Watch patterns | `apps/web/**`, `pnpm-lock.yaml`, `package.json` |
-| Domain | port **8080** |
+| Start command | `pnpm --filter @dulacmycamp/web exec serve -s dist -l $PORT` |
+| Watch patterns | `apps/web/**`, `pnpm-lock.yaml`, `package.json`, `.node-version` |
+| Domain | port **8080** (`PORT=8080` is set to match) |
 
-Two things worth knowing about the web service:
+Three things about the web service that cost a deploy each to discover:
 
 1. **It builds from the repo root, not `apps/web`.** `pnpm-lock.yaml` lives at
-   the workspace root, and Nixpacks runs its own `pnpm i --frozen-lockfile`
-   before any build command. Rooted at `apps/web` that fails with
-   `ERR_PNPM_NO_LOCKFILE`. Building from the root uses the committed lockfile,
-   so deploys are reproducible.
-2. **Nixpacks serves the build with Caddy on port 8080**, having detected a
-   static site — it supersedes the `serve` start command, and handles SPA
-   fallback (deep links like `/calendar` return the app, not a 404). The
-   generated domain must therefore target **8080**, not 3000. A domain pointed
-   at the wrong port fails as a 502 with a perfectly healthy container.
+   the workspace root, and the builder runs `pnpm i --frozen-lockfile` before
+   any build command. Rooted at `apps/web` that fails with
+   `ERR_PNPM_NO_LOCKFILE`. From the root the committed lockfile is used, so
+   deploys are reproducible rather than re-resolving every build.
+
+2. **The builder defaults to Node 18.** Vite 8 bundles rolldown, which imports
+   `styleText` from `node:util` (Node 20.12+), so the build died with a
+   `SyntaxError` before emitting anything. Fixed in the repo with
+   `engines.node` and `.node-version` rather than a Railway-only setting, so
+   the next environment doesn't hit the same wall.
+
+3. **`serve` defaults to port 3000, the generated domain targeted 3000, and
+   the container listened on 8080.** A port mismatch surfaces as a 502 with a
+   perfectly healthy container and nothing useful in the logs. `PORT=8080` and
+   the domain's target port are now pinned to each other.
+
+A note on reading build failures: `railway logs --service <svc> --build`
+returns the last *successful* build, which is deeply misleading when you are
+chasing a failure. For the failed one, query it directly:
+
+```bash
+DEP=$(railway deployment list --service dulacmycamp-web --json | python3 -c "import json,sys;print(json.load(sys.stdin)[0]['id'])")
+railway api 'query($id:String!){buildLogs(deploymentId:$id,limit:400){message}}' --raw-var "id=$DEP"
+```
 
 ## Variables
 
@@ -114,6 +130,12 @@ emails are dead, with nothing failing anywhere else.
 - [ ] Replace placeholder photos, house rules and amenities in
       `apps/web/src/routes/Landing.tsx` (marked `TODO(content)`).
 - [ ] Consider a custom domain.
+- [ ] **Remove the test account** `prod-check@example.com` — created while
+      verifying the live OTP endpoint from a browser. It is an empty guest row
+      with no bookings. There is no user-delete endpoint in the API, and
+      `railway connect Postgres` needs an SSH key registered on the account
+      (`railway ssh keys add`), so it was left in place rather than changing
+      account security settings. Harmless, but it shows in the admin Users tab.
 
 ## Operations
 
