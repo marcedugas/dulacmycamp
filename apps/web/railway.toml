@@ -1,13 +1,25 @@
 # Railway service: dulacmycamp-web
-# Set the service's root directory to `apps/web` in the Railway dashboard, and
-# set VITE_API_URL to the public URL of the API service before building —
-# Vite inlines it at build time, so changing it needs a redeploy.
+#
+# This service builds from the REPOSITORY ROOT, not from apps/web, and is
+# pointed at this file via the service's "config file path" setting.
+#
+# Why: apps/web has no lockfile of its own — pnpm-lock.yaml lives at the
+# workspace root. Building with apps/web as the root directory made nixpacks
+# run `pnpm i --frozen-lockfile` against a directory with no lockfile, which
+# fails. Building from the root uses the committed lockfile, so deploys are
+# reproducible instead of resolving dependencies afresh every time.
+#
+# VITE_API_URL must be set on the service before the build: Vite inlines it,
+# so changing it requires a redeploy, not just a restart.
 
 [build]
 builder = "nixpacks"
-buildCommand = "pnpm install --frozen-lockfile=false && pnpm build"
+# nixpacks runs `pnpm i --frozen-lockfile` at the root on its own; this only
+# has to produce the bundle.
+buildCommand = "pnpm --filter @dulacmycamp/web build"
 
 [deploy]
-startCommand = "pnpm exec serve -s dist -l $PORT"
+# `pnpm exec` runs inside the package directory, so `dist` is apps/web/dist.
+startCommand = "pnpm --filter @dulacmycamp/web exec serve -s dist -l $PORT"
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 5
