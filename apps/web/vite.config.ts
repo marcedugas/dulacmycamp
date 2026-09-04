@@ -13,6 +13,12 @@ export default defineConfig({
         target: process.env.VITE_API_PROXY ?? 'http://localhost:8080',
         changeOrigin: true,
       },
+      // Uploaded hero/gallery images are served from the API too, at a
+      // plain (non-/api) path — see services/api/src/site_content.rs.
+      '/uploads': {
+        target: process.env.VITE_API_PROXY ?? 'http://localhost:8080',
+        changeOrigin: true,
+      },
     },
   },
 });

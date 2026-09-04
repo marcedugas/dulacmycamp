@@ -91,6 +91,43 @@ export interface Holiday {
   name: string;
 }
 
+// ── site content ──
+
+/** Public, combined payload for the landing page — GET /api/site-content. */
+export interface SiteContent {
+  hero_title: string;
+  hero_subtitle: string;
+  about_text: string;
+  hero_image_url: string | null;
+  guest_photos_url: string | null;
+  rules: { id: string; text: string }[];
+  amenities: { id: string; label: string; icon: string | null }[];
+  gallery: { id: string; url: string; caption: string | null }[];
+}
+
+export interface RuleItem {
+  id: string;
+  text: string;
+  sort_order: number;
+  created_at: string;
+}
+
+export interface AmenityItem {
+  id: string;
+  label: string;
+  icon: string | null;
+  sort_order: number;
+  created_at: string;
+}
+
+export interface GalleryPhoto {
+  id: string;
+  url: string;
+  caption: string | null;
+  sort_order: number;
+  created_at: string;
+}
+
 export interface Message {
   id: string;
   subject: string | null;

@@ -4,9 +4,10 @@ import { InboxView } from '../Inbox';
 import BookingsTab from './BookingsTab';
 import BlackoutTab from './BlackoutTab';
 import EventsTab from './EventsTab';
+import SiteContentTab from './SiteContentTab';
 import UsersTab from './UsersTab';
 
-const TABS = ['Bookings', 'Blackout Dates', 'Events', 'Users', 'Messages'] as const;
+const TABS = ['Bookings', 'Blackout Dates', 'Events', 'Site Content', 'Users', 'Messages'] as const;
 type Tab = (typeof TABS)[number];
 
 export default function AdminPanel() {
@@ -37,6 +38,7 @@ export default function AdminPanel() {
       {tab === 'Bookings' && <BookingsTab />}
       {tab === 'Blackout Dates' && <BlackoutTab />}
       {tab === 'Events' && <EventsTab />}
+      {tab === 'Site Content' && <SiteContentTab />}
       {tab === 'Users' && <UsersTab />}
       {tab === 'Messages' && <InboxView all />}
     </div>

@@ -21,6 +21,18 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Resolves a server-relative path (an uploaded image's `/uploads/...` URL)
+ * against the API's own origin. The web and API services sit on different
+ * subdomains in production, so a bare relative path would 404 there even
+ * though it works in local dev (the Vite proxy papers over it).
+ */
+export function assetUrl(path: string | null | undefined): string | null {
+  if (!path) return null;
+  if (/^https?:\/\//.test(path)) return path;
+  return `${BASE}${path}`;
+}
+
 export function getToken(): string | null {
   try {
     return localStorage.getItem(TOKEN_KEY);
@@ -49,15 +61,20 @@ export async function api<T>(path: string, opts: Options = {}): Promise<T> {
   const { method = 'GET', body, anonymous } = opts;
   const headers: Record<string, string> = {};
   const token = anonymous ? null : getToken();
+  // FormData (file uploads) must NOT get a Content-Type set here — the
+  // browser needs to add its own boundary parameter, which it only does
+  // when the header is left unset.
+  const isFormData = body instanceof FormData;
 
   if (token) headers.Authorization = `Bearer ${token}`;
-  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (body !== undefined && !isFormData) headers['Content-Type'] = 'application/json';
 
-  const res = await fetch(`${BASE}/api${path}`, {
-    method,
-    headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  let requestBody: BodyInit | undefined;
+  if (body === undefined) requestBody = undefined;
+  else if (body instanceof FormData) requestBody = body;
+  else requestBody = JSON.stringify(body);
+
+  const res = await fetch(`${BASE}/api${path}`, { method, headers, body: requestBody });
 
   if (!res.ok) {
     // The API always answers with { error: { code, message } }; fall back to

@@ -1,6 +1,17 @@
 import { useQueries, useQuery } from '@tanstack/react-query';
 import { api } from './api';
-import type { BlackoutDate, Booking, Holiday, Message, SpecialEvent, UserWithStats } from './types';
+import type {
+  AmenityItem,
+  BlackoutDate,
+  Booking,
+  GalleryPhoto,
+  Holiday,
+  Message,
+  RuleItem,
+  SiteContent,
+  SpecialEvent,
+  UserWithStats,
+} from './types';
 
 export interface PublicConfig {
   camp_name: string;
@@ -70,6 +81,38 @@ export function useHolidays(years: number[]) {
     data: results.flatMap((r) => r.data ?? []),
     isLoading: results.some((r) => r.isLoading),
   };
+}
+
+/** Hero/about text, rules, amenities, and gallery for the landing page. */
+export function useSiteContent() {
+  return useQuery({
+    queryKey: ['site-content'],
+    queryFn: () => api<SiteContent>('/site-content', { anonymous: true }),
+  });
+}
+
+/** Admin-only: full rule rows (with sort_order) for the Site Content tab. */
+export function useRulesAdmin() {
+  return useQuery({
+    queryKey: ['admin-rules'],
+    queryFn: () => api<RuleItem[]>('/admin/rules'),
+  });
+}
+
+/** Admin-only: full amenity rows (with sort_order) for the Site Content tab. */
+export function useAmenitiesAdmin() {
+  return useQuery({
+    queryKey: ['admin-amenities'],
+    queryFn: () => api<AmenityItem[]>('/admin/amenities'),
+  });
+}
+
+/** Admin-only: full gallery rows (with sort_order) for the Site Content tab. */
+export function useGalleryAdmin() {
+  return useQuery({
+    queryKey: ['admin-gallery'],
+    queryFn: () => api<GalleryPhoto[]>('/admin/gallery'),
+  });
 }
 
 export function useMessages(all = false) {

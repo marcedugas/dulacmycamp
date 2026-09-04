@@ -13,11 +13,13 @@ pub mod events;
 pub mod holidays;
 pub mod notifications;
 pub mod rate_limit;
+pub mod site_content;
 pub mod users;
 pub mod weather;
 
 use axum::{
     Json, Router,
+    extract::DefaultBodyLimit,
     http::{HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
@@ -26,7 +28,7 @@ use serde_json::json;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::RwLock;
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
 
 /// Dulac, Louisiana — used for the forecast grid and the solar calculation.
 pub const CAMP_LAT: f64 = 29.3802;
@@ -51,6 +53,12 @@ pub struct Config {
     pub noaa_station_id: String,
     pub capacity_adults: i64,
     pub bind_addr: String,
+    /// Where uploaded hero/gallery images are written and served from. Must
+    /// point at a persistent volume in production — the container
+    /// filesystem is wiped on every redeploy, and anything saved outside
+    /// this path (or on a Railway service with no volume attached) does not
+    /// survive one.
+    pub upload_dir: String,
 }
 
 impl Config {
@@ -85,6 +93,7 @@ impl Config {
                 let port = opt("PORT").unwrap_or_else(|| "8080".into());
                 format!("0.0.0.0:{port}")
             }),
+            upload_dir: opt("UPLOAD_DIR").unwrap_or_else(|| "/data/uploads".into()),
         })
     }
 }
@@ -123,6 +132,10 @@ pub async fn build_state(cfg: Config) -> anyhow::Result<Shared> {
 
     sqlx::migrate!("./migrations").run(&db).await?;
 
+    // A no-op if the path already exists (e.g. a mounted volume's root) —
+    // only matters for a fresh local checkout with no UPLOAD_DIR override.
+    tokio::fs::create_dir_all(&cfg.upload_dir).await?;
+
     let http = reqwest::Client::builder()
         // api.weather.gov rejects requests without an identifying User-Agent.
         .user_agent("dulacmycamp/0.1 (marc@recoresystems.net)")
@@ -141,6 +154,7 @@ pub async fn build_state(cfg: Config) -> anyhow::Result<Shared> {
 /// Every HTTP route in the service.
 pub fn router(state: Shared) -> Router {
     let cors = cors_layer(&state.cfg);
+    let upload_dir = state.cfg.upload_dir.clone();
 
     let api = Router::new()
         .route("/health", get(health))
@@ -177,6 +191,43 @@ pub fn router(state: Shared) -> Router {
         .route("/events/{id}", put(events::update).delete(events::remove))
         // Reference-only, computed — never touches availability or capacity.
         .route("/holidays", get(holidays::list))
+        // ── site content ──
+        .route("/site-content", get(site_content::get_site_content))
+        .route(
+            "/admin/site-content/settings",
+            put(site_content::update_settings),
+        )
+        .route(
+            "/admin/site-content/hero-image",
+            post(site_content::upload_hero_image)
+                .layer(DefaultBodyLimit::max(site_content::UPLOAD_REQUEST_LIMIT)),
+        )
+        .route(
+            "/admin/rules",
+            get(site_content::list_rules_admin).post(site_content::create_rule),
+        )
+        .route(
+            "/admin/rules/{id}",
+            put(site_content::update_rule).delete(site_content::delete_rule),
+        )
+        .route(
+            "/admin/amenities",
+            get(site_content::list_amenities_admin).post(site_content::create_amenity),
+        )
+        .route(
+            "/admin/amenities/{id}",
+            put(site_content::update_amenity).delete(site_content::delete_amenity),
+        )
+        .route(
+            "/admin/gallery",
+            get(site_content::list_gallery_admin)
+                .post(site_content::create_gallery_photo)
+                .layer(DefaultBodyLimit::max(site_content::UPLOAD_REQUEST_LIMIT)),
+        )
+        .route(
+            "/admin/gallery/{id}",
+            put(site_content::update_gallery_photo).delete(site_content::delete_gallery_photo),
+        )
         // ── inbox ──
         .route(
             "/messages",
@@ -191,6 +242,9 @@ pub fn router(state: Shared) -> Router {
 
     Router::new()
         .nest("/api", api)
+        // Not under /api — matches the plain `/uploads/{filename}` URLs
+        // saved onto site_settings/gallery_photos rows.
+        .nest_service("/uploads", ServeDir::new(upload_dir))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)

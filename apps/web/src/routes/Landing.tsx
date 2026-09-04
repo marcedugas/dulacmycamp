@@ -2,44 +2,23 @@ import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { addDays, format } from 'date-fns';
 import {
-  Anchor,
   CalendarDays,
   CheckCircle2,
-  Flame,
+  ExternalLink,
   Image as ImageIcon,
   PartyPopper,
-  Ship,
-  Snowflake,
-  Utensils,
-  Wifi,
   XCircle,
 } from 'lucide-react';
 import { buildIndex } from '../components/CampCalendar';
 import { LunarWidget, TideWidget, WeatherWidget } from '../components/EnvironmentWidgets';
-import { Button, Card, EmptyState, Section, cx } from '../components/ui';
-import { useCalendarData, useConfig } from '../lib/queries';
+import { Button, Card, EmptyState, Section, Spinner, cx } from '../components/ui';
+import { assetUrl } from '../lib/api';
+import { amenityIcon } from '../lib/icons';
+import { useCalendarData, useConfig, useSiteContent } from '../lib/queries';
 import { daysInclusive, formatRange, parseDay, toKey } from '../lib/dates';
 
-// TODO(content): replace with the real amenity list from Marc/Jean.
-const AMENITIES = [
-  { icon: Ship, label: 'Boat slip & launch', detail: 'Covered slip; ramp two minutes away' },
-  { icon: Snowflake, label: 'Central A/C & heat', detail: 'Plus a chest freezer for the catch' },
-  { icon: Utensils, label: 'Full kitchen', detail: 'Stove, oven, fridge, coffee maker' },
-  { icon: Flame, label: 'Outdoor cooker', detail: 'Propane burner and fish-cleaning table' },
-  { icon: Wifi, label: 'Wi-Fi & TV', detail: 'Satellite internet, streaming on the big screen' },
-  { icon: Anchor, label: 'Sleeps 6 adults', detail: 'More with kids on the bunks' },
-];
-
-// TODO(content): confirm house rules with the owners before launch.
-const RULES = [
-  'Clean up before you leave — sweep, run the dishwasher, take the trash to the road.',
-  'Strip the beds and start a load of towels. Fresh linens are in the hall closet.',
-  'Cut the A/C to 78° and kill the water heater breaker when you lock up.',
-  'Clean fish at the outside table only, and bag the scraps — never in the bayou.',
-  'No smoking inside. The porch is yours.',
-  'Pets are welcome but must be asked for on the booking form.',
-  'Last one out: doors locked, windows latched, boat slip cover down.',
-];
+const DEFAULT_HERO_TITLE = 'Dulac My Camp';
+const DEFAULT_HERO_SUBTITLE = 'A fishing camp in the heart of Dulac, Louisiana';
 
 /** Quick "are these dates free?" check, answered from data already on the page. */
 function AvailabilityWidget() {
@@ -171,28 +150,64 @@ function UpcomingEvents() {
   );
 }
 
+/** "Leaving the site" link to a guest-managed Google Photos album. Renders nothing when unset. */
+function GuestPhotosLink({ url }: { url: string | null }) {
+  if (!url) return null;
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noreferrer noopener"
+      className="inline-flex items-center gap-1.5 text-sm font-semibold text-forest-700 hover:text-forest-800 hover:underline"
+    >
+      See Everyone's Photos <ExternalLink size={14} />
+    </a>
+  );
+}
+
 export default function Landing() {
   const { data: config } = useConfig();
+  const { data: content, isLoading } = useSiteContent();
+
+  // Loading and "freshly migrated, nobody's edited it yet" render the same
+  // way on purpose — these match the DB defaults from migration 0005, so
+  // there's no flash between the two.
+  const heroTitle = content?.hero_title ?? DEFAULT_HERO_TITLE;
+  const heroSubtitle = content?.hero_subtitle ?? DEFAULT_HERO_SUBTITLE;
+  const heroImageUrl = assetUrl(content?.hero_image_url);
+  const aboutText = content?.about_text?.trim();
+  const rules = content?.rules ?? [];
+  const amenities = content?.amenities ?? [];
+  const gallery = content?.gallery ?? [];
+  const guestPhotosUrl = content?.guest_photos_url ?? null;
 
   return (
     <>
-      {/* Hero. The gradient stands in for the real camp photo — see README. */}
+      {/* Hero. A real photo once one's uploaded; the gradient is the
+          permanent fallback, not just a loading state — see D1. */}
       <section className="relative isolate overflow-hidden bg-charcoal">
         <div
           className="absolute inset-0 bg-gradient-to-br from-forest-900 via-forest-700 to-bayou-800"
           aria-hidden
         />
+        {heroImageUrl && (
+          <img
+            src={heroImageUrl}
+            alt=""
+            aria-hidden
+            className="absolute inset-0 h-full w-full object-cover"
+          />
+        )}
+        <div className="absolute inset-0 bg-charcoal/35" aria-hidden />
         <div className="wood-grain absolute inset-0 opacity-40" aria-hidden />
         <div className="relative mx-auto flex max-w-6xl flex-col items-center px-4 py-28 text-center sm:py-36">
           <p className="mb-3 text-xs font-bold uppercase tracking-[0.25em] text-forest-200">
             {config?.location ?? 'Dulac, Louisiana'}
           </p>
           <h1 className="font-display text-5xl font-extrabold text-cream drop-shadow sm:text-7xl">
-            Dulac My Camp
+            {heroTitle}
           </h1>
-          <p className="mt-4 max-w-xl text-lg text-cream/85">
-            A fishing camp in the heart of Dulac, Louisiana
-          </p>
+          <p className="mt-4 max-w-xl text-lg text-cream/85">{heroSubtitle}</p>
           <div className="mt-8 flex flex-wrap justify-center gap-3">
             <Link to="/calendar">
               <Button variant="secondary" size="lg">
@@ -214,49 +229,92 @@ export default function Landing() {
 
       <Section
         title="About the camp"
-        subtitle={`Family and friends only. The camp sleeps ${config?.capacity_adults ?? 6} adults comfortably — more with kids on the bunks.`}
+        subtitle={
+          aboutText ||
+          `Family and friends only. The camp sleeps ${config?.capacity_adults ?? 6} adults comfortably — more with kids on the bunks.`
+        }
         id="about"
       >
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {AMENITIES.map(({ icon: Icon, label, detail }) => (
-            <Card key={label} className="flex items-start gap-3">
-              <Icon className="mt-0.5 shrink-0 text-forest-600" size={20} />
-              <div>
-                <p className="font-semibold text-charcoal">{label}</p>
-                <p className="text-sm text-muted">{detail}</p>
-              </div>
-            </Card>
-          ))}
-        </div>
+        {isLoading ? (
+          <div className="flex justify-center py-10">
+            <Spinner />
+          </div>
+        ) : amenities.length === 0 ? (
+          <EmptyState title="No amenities listed yet" hint="Add some from the admin panel's Site Content tab." />
+        ) : (
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {amenities.map((a) => {
+              const Icon = amenityIcon(a.icon);
+              return (
+                <Card key={a.id} className="flex items-center gap-3">
+                  <Icon className="shrink-0 text-forest-600" size={20} />
+                  <p className="font-semibold text-charcoal">{a.label}</p>
+                </Card>
+              );
+            })}
+          </div>
+        )}
 
-        {/* Photo slots — drop real images in and swap these placeholders out. */}
-        <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          {['The camp', 'The dock', 'The bayou', 'The catch'].map((caption) => (
-            <div
-              key={caption}
-              className="flex aspect-4/3 flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-sand bg-cream-dark/60 text-muted"
-            >
-              <ImageIcon size={22} />
-              <span className="text-xs font-semibold uppercase tracking-wide">{caption}</span>
+        {/* Gallery. */}
+        <div className="mt-6">
+          {gallery.length > 0 ? (
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              {gallery.map((g) => (
+                <figure
+                  key={g.id}
+                  className="group relative aspect-4/3 overflow-hidden rounded-xl border border-sand bg-cream-dark/60"
+                >
+                  <img
+                    src={assetUrl(g.url) ?? undefined}
+                    alt={g.caption ?? ''}
+                    className="h-full w-full object-cover transition group-hover:scale-105"
+                  />
+                  {g.caption && (
+                    <figcaption className="absolute inset-x-0 bottom-0 bg-charcoal/70 px-2 py-1 text-xs font-semibold text-cream">
+                      {g.caption}
+                    </figcaption>
+                  )}
+                </figure>
+              ))}
             </div>
-          ))}
+          ) : (
+            !isLoading && (
+              <div className="flex aspect-4/3 max-w-xs flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-sand bg-cream-dark/60 text-muted">
+                <ImageIcon size={22} />
+                <span className="text-xs font-semibold uppercase tracking-wide">Photos coming soon</span>
+              </div>
+            )
+          )}
+          {guestPhotosUrl && (
+            <div className="mt-4">
+              <GuestPhotosLink url={guestPhotosUrl} />
+            </div>
+          )}
         </div>
       </Section>
 
       <div className="bg-cream-dark/50">
         <Section title="House rules" subtitle="Short list. Leave it better than you found it.">
-          <Card>
-            <ul className="space-y-3">
-              {RULES.map((rule, i) => (
-                <li key={rule} className="flex gap-3 text-sm text-charcoal">
-                  <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-forest-100 text-xs font-bold text-forest-700">
-                    {i + 1}
-                  </span>
-                  {rule}
-                </li>
-              ))}
-            </ul>
-          </Card>
+          {isLoading ? (
+            <div className="flex justify-center py-10">
+              <Spinner />
+            </div>
+          ) : rules.length === 0 ? (
+            <EmptyState title="No rules posted yet" hint="Add some from the admin panel's Site Content tab." />
+          ) : (
+            <Card>
+              <ul className="space-y-3">
+                {rules.map((rule, i) => (
+                  <li key={rule.id} className="flex gap-3 text-sm text-charcoal">
+                    <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-forest-100 text-xs font-bold text-forest-700">
+                      {i + 1}
+                    </span>
+                    {rule.text}
+                  </li>
+                ))}
+              </ul>
+            </Card>
+          )}
         </Section>
       </div>
 
