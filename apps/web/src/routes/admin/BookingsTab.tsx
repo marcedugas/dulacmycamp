@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { format } from 'date-fns';
 import { toast } from 'sonner';
-import { Check, Dog, TriangleAlert, X } from 'lucide-react';
+import { Check, CheckCircle2, Dog, Flag, TriangleAlert, X } from 'lucide-react';
 import {
   Button,
   Card,
@@ -14,9 +14,9 @@ import {
   cx,
 } from '../../components/ui';
 import { api, ApiError } from '../../lib/api';
-import { useBookings } from '../../lib/queries';
+import { useAdminCheckouts, useBookings } from '../../lib/queries';
 import { formatRange, nightCount, parseDay, pluralNights } from '../../lib/dates';
-import type { Booking, BookingStatus } from '../../lib/types';
+import type { AdminCheckout, Booking, BookingStatus } from '../../lib/types';
 
 const STATUSES: (BookingStatus | 'all')[] = ['all', 'pending', 'approved', 'denied', 'cancelled'];
 
@@ -47,6 +47,11 @@ export default function BookingsTab() {
   const [denying, setDenying] = useState<Booking | null>(null);
   const [reason, setReason] = useState('');
   const [details, setDetails] = useState<Booking | null>(null);
+  const [viewingCheckout, setViewingCheckout] = useState<Booking | null>(null);
+  const { data: checkouts } = useAdminCheckouts();
+  const checkoutDetail: AdminCheckout | undefined = viewingCheckout
+    ? checkouts?.find((c) => c.booking_id === viewingCheckout.id)
+    : undefined;
 
   const bookings = data ?? [];
   const overlaps = useMemo(() => findOverlaps(bookings), [bookings]);
@@ -183,7 +188,26 @@ export default function BookingsTab() {
                       {b.has_pets && <Dog size={13} className="ml-1 inline text-wood-600" />}
                     </td>
                     <td className="px-3 py-2.5">
-                      <StatusBadge status={b.status} />
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <StatusBadge status={b.status} />
+                        {b.checked_out && (
+                          <span
+                            title={b.checkout_notes ? 'Checked out — has a note' : 'Checked out'}
+                            className="inline-flex items-center gap-1 rounded-full border border-forest-300 bg-forest-100 px-2 py-0.5 text-[11px] font-semibold text-forest-800"
+                          >
+                            <CheckCircle2 size={11} /> Checked out
+                            {b.checkout_notes && (
+                              <button
+                                onClick={() => setViewingCheckout(b)}
+                                aria-label="View checkout note"
+                                className="text-clay hover:text-clay/70"
+                              >
+                                <Flag size={11} />
+                              </button>
+                            )}
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-3 py-2.5 text-xs text-muted">
                       {b.created_at ? format(new Date(b.created_at), 'MMM d, yyyy') : '—'}
@@ -279,6 +303,39 @@ export default function BookingsTab() {
               <p className="rounded bg-red-50 px-3 py-2 text-red-900">{details.denied_reason}</p>
             )}
           </Card>
+        )}
+      </Modal>
+
+      <Modal open={Boolean(viewingCheckout)} onClose={() => setViewingCheckout(null)} title="Checkout note">
+        {viewingCheckout && (
+          <div className="space-y-3 text-sm">
+            <p className="text-muted">
+              {viewingCheckout.guest_name} ·{' '}
+              {formatRange(viewingCheckout.check_in, viewingCheckout.check_out)}
+            </p>
+            {checkoutDetail?.notes && (
+              <p className="rounded-lg border-l-2 border-clay bg-red-50 px-3 py-2 text-red-900">
+                {checkoutDetail.notes}
+              </p>
+            )}
+            {checkoutDetail && (
+              <div>
+                <p className="mb-1.5 text-xs font-bold uppercase tracking-wide text-muted">Checklist</p>
+                <ul className="space-y-1">
+                  {checkoutDetail.items.map((item) => (
+                    <li key={item.id} className="flex items-center gap-2 text-charcoal">
+                      {item.checked ? (
+                        <Check size={14} className="text-forest-600" />
+                      ) : (
+                        <X size={14} className="text-muted" />
+                      )}
+                      <span className={cx(!item.checked && 'text-muted')}>{item.label}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
         )}
       </Modal>
     </>

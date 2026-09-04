@@ -71,10 +71,13 @@ export default function Nav() {
         { to: '/calendar', label: 'Calendar' },
         { to: '/book', label: 'Book' },
         { to: '/my-bookings', label: 'My Bookings' },
+        { to: '/checkout', label: 'Checkout' },
+        { to: '/journal', label: 'Journal' },
       ]
     : [
         { to: '/calendar', label: 'Calendar' },
         { to: '/book', label: 'Book Now' },
+        { to: '/journal', label: 'Journal' },
       ];
 
   return (

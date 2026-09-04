@@ -300,6 +300,113 @@ pub fn action_result_page(heading: &str, detail: &str, ok: bool) -> String {
     )
 }
 
+// ─────────────────────────── checkout / journal ───────────────────────────
+
+/// Sent to the admin only when a guest actually flags something at
+/// checkout — routine checkouts with nothing to report generate no email.
+pub fn checkout_notes_to_admin(
+    guest: &str,
+    check_in: chrono::NaiveDate,
+    check_out: chrono::NaiveDate,
+    notes: &str,
+    app_url: &str,
+) -> Email {
+    let subject = format!("{guest} flagged something at checkout");
+    let mut rows = String::new();
+    rows.push_str(&row("Guest", &esc(guest)));
+    rows.push_str(&row(
+        "Dates",
+        &format!("{} &rarr; {}", pretty(check_in), pretty(check_out)),
+    ));
+    let body = format!(
+        r#"<table role="presentation" cellpadding="0" cellspacing="0" style="margin:6px 0 16px;">{rows}</table>
+<p style="margin:0 0 6px;font-size:13px;color:#6b6255;">Note</p>
+<p style="margin:0;padding:12px 14px;background:#efe9df;border-left:3px solid {BROWN};border-radius:4px;">{}</p>"#,
+        esc(notes)
+    );
+    let actions = format!(
+        r#"<table role="presentation" cellpadding="0" cellspacing="0" style="margin:22px 0 4px;"><tr>{}</tr></table>"#,
+        button("Open admin panel", &format!("{app_url}/admin"), BROWN)
+    );
+    let text = format!(
+        "{guest} flagged something at checkout\n\nGuest: {guest}\nDates: {} - {}\n\nNote:\n{notes}\n\n{app_url}/admin\n",
+        pretty(check_in),
+        pretty(check_out),
+    );
+    (subject, layout("Checkout note", &body, &actions), text)
+}
+
+/// Informational — no one-click buttons, unlike booking approval. The admin
+/// should read the story before deciding, not act blind from an email.
+pub fn journal_submitted_to_admin(
+    guest: &str,
+    check_in: chrono::NaiveDate,
+    check_out: chrono::NaiveDate,
+    title: &str,
+    app_url: &str,
+) -> Email {
+    let subject = format!("{guest} submitted a journal entry");
+    let mut rows = String::new();
+    rows.push_str(&row("Guest", &esc(guest)));
+    rows.push_str(&row(
+        "Stay",
+        &format!("{} &rarr; {}", pretty(check_in), pretty(check_out)),
+    ));
+    rows.push_str(&row("Title", &esc(title)));
+    let body = format!(
+        r#"<p style="margin:0 0 14px;">A new camp journal story is waiting for review.</p><table role="presentation" cellpadding="0" cellspacing="0" style="margin:6px 0 4px;">{rows}</table>"#
+    );
+    let actions = format!(
+        r#"<table role="presentation" cellpadding="0" cellspacing="0" style="margin:22px 0 4px;"><tr>{}</tr></table>"#,
+        button("Review in admin panel", &format!("{app_url}/admin"), BROWN)
+    );
+    let text = format!(
+        "{guest} submitted a journal entry\n\nGuest: {guest}\nStay: {} - {}\nTitle: {title}\n\n{app_url}/admin\n",
+        pretty(check_in),
+        pretty(check_out),
+    );
+    (subject, layout("New journal entry", &body, &actions), text)
+}
+
+pub fn journal_approved_to_guest(app_url: &str) -> Email {
+    let subject = "Your journal entry is live! 📖".to_string();
+    let body = r#"<p style="margin:0 0 14px;">Your story from your stay at Dulac My Camp is now posted in the camp journal.</p>"#.to_string();
+    let actions = format!(
+        r#"<table role="presentation" cellpadding="0" cellspacing="0" style="margin:22px 0 4px;"><tr>{}</tr></table>"#,
+        button("View journal", &format!("{app_url}/journal"), GREEN)
+    );
+    let text = format!(
+        "Your journal entry is live!\n\nYour story from your stay at Dulac My Camp is now posted in the camp journal.\n\n{app_url}/journal\n"
+    );
+    (subject, layout("Story posted", &body, &actions), text)
+}
+
+/// Deliberately warm, not bureaucratic — this is a private camp, not a
+/// moderated public forum.
+pub fn journal_rejected_to_guest(reason: Option<&str>, app_url: &str) -> Email {
+    let subject = "About your journal entry".to_string();
+    let reason_line = reason
+        .filter(|r| !r.trim().is_empty())
+        .map(|r| format!(" {}", esc(r)))
+        .unwrap_or_default();
+    let body = format!(
+        r#"<p style="margin:0 0 14px;">Thanks for sharing your story from the camp. We didn't post this one.{reason_line}</p>
+<p style="margin:0;">Feel free to submit again!</p>"#
+    );
+    let actions = format!(
+        r#"<table role="presentation" cellpadding="0" cellspacing="0" style="margin:22px 0 4px;"><tr>{}</tr></table>"#,
+        button("My bookings", &format!("{app_url}/my-bookings"), GREEN)
+    );
+    let text = format!(
+        "About your journal entry\n\nThanks for sharing your story from the camp. We didn't post this one.{}\n\nFeel free to submit again!\n{app_url}/my-bookings\n",
+        reason
+            .filter(|r| !r.trim().is_empty())
+            .map(|r| format!(" {r}"))
+            .unwrap_or_default(),
+    );
+    (subject, layout("About your story", &body, &actions), text)
+}
+
 /// The optional-reason form shown by `GET /api/bookings/deny/{token}`.
 pub fn deny_form_page(action_url: &str, guest: &str, dates: &str) -> String {
     format!(

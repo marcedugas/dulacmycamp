@@ -7,10 +7,13 @@
 pub mod admin;
 pub mod auth;
 pub mod bookings;
+pub mod checklist;
+pub mod checkout;
 pub mod email;
 pub mod email_templates;
 pub mod events;
 pub mod holidays;
+pub mod journal;
 pub mod notifications;
 pub mod rate_limit;
 pub mod site_content;
@@ -228,6 +231,37 @@ pub fn router(state: Shared) -> Router {
             "/admin/gallery/{id}",
             put(site_content::update_gallery_photo).delete(site_content::delete_gallery_photo),
         )
+        // ── checklist ──
+        .route("/checklist", get(checklist::list_active))
+        .route(
+            "/admin/checklist",
+            get(checklist::list_all).post(checklist::create),
+        )
+        .route(
+            "/admin/checklist/{id}",
+            put(checklist::update).delete(checklist::remove),
+        )
+        // ── checkout ──
+        // Completing checkout is the trigger that unlocks the journal
+        // prompt — chained inline via `journal_eligible` in the response,
+        // not a separate background job.
+        .route("/checkout/eligible", get(checkout::eligible))
+        .route("/checkout", post(checkout::submit))
+        .route("/admin/checkouts", get(checkout::admin_list))
+        // ── journal ──
+        .route("/journal", get(journal::list_public).post(journal::create))
+        .route("/journal/mine", get(journal::list_mine))
+        .route(
+            "/journal/eligible-bookings",
+            get(journal::eligible_bookings),
+        )
+        .route("/journal/admin", get(journal::admin_list))
+        .route(
+            "/journal/{id}",
+            put(journal::update).delete(journal::remove),
+        )
+        .route("/journal/{id}/approve", put(journal::approve))
+        .route("/journal/{id}/reject", put(journal::reject))
         // ── inbox ──
         .route(
             "/messages",

@@ -29,6 +29,8 @@ export interface UserWithStats extends User {
  * present for the booking's owner and for admins — the public calendar shows
  * that the camp is taken, never by whom.
  */
+export type JournalStatus = 'pending' | 'approved' | 'rejected';
+
 export interface Booking {
   id: string;
   check_in: string;
@@ -46,6 +48,11 @@ export interface Booking {
   approved_at?: string;
   approved_by?: string;
   created_at?: string;
+  /** Same visibility as guest_name etc. — the booking's owner and admins. */
+  checked_out?: boolean;
+  checkout_notes?: string;
+  journal_id?: string;
+  journal_status?: JournalStatus;
 }
 
 export interface Capacity {
@@ -126,6 +133,107 @@ export interface GalleryPhoto {
   caption: string | null;
   sort_order: number;
   created_at: string;
+}
+
+// ── checkout checklist ──
+
+export interface ChecklistItem {
+  id: string;
+  label: string;
+  sort_order: number;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CheckoutEligibleBooking {
+  id: string;
+  check_in: string;
+  check_out: string;
+  guest_count_adults: number;
+  guest_count_kids: number;
+}
+
+export interface CheckoutResponse {
+  success: boolean;
+  booking_id: string;
+  journal_eligible: boolean;
+}
+
+export interface AdminChecklistState {
+  id: string;
+  label: string;
+  checked: boolean;
+}
+
+export interface AdminCheckout {
+  id: string;
+  booking_id: string;
+  guest_name: string;
+  guest_email: string;
+  check_in: string;
+  check_out: string;
+  completed_at: string;
+  notes: string | null;
+  items: AdminChecklistState[];
+}
+
+// ── camp journal ──
+
+/** A journal entry as its own author sees it — any status. */
+export interface JournalEntry {
+  id: string;
+  user_id: string;
+  booking_id: string;
+  title: string;
+  body: string;
+  status: JournalStatus;
+  rejected_reason: string | null;
+  approved_at: string | null;
+  approved_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** An approved entry as it appears on the public feed — no guest email, no ratings. */
+export interface PublicJournalEntry {
+  id: string;
+  title: string;
+  body: string;
+  created_at: string;
+  approved_at: string | null;
+  guest_first_name: string;
+  check_in: string;
+  check_out: string;
+}
+
+export interface PublicJournalPage {
+  entries: PublicJournalEntry[];
+  page: number;
+  page_size: number;
+  total: number;
+  total_pages: number;
+}
+
+export interface JournalEligibleBooking {
+  booking_id: string;
+  check_in: string;
+  check_out: string;
+}
+
+export interface AdminJournalEntry {
+  id: string;
+  title: string;
+  body: string;
+  status: JournalStatus;
+  rejected_reason: string | null;
+  created_at: string;
+  approved_at: string | null;
+  approved_by: string | null;
+  guest_name: string | null;
+  guest_email: string;
+  check_in: string;
+  check_out: string;
 }
 
 export interface Message {

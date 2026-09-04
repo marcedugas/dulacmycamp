@@ -56,6 +56,12 @@ struct BookingRow {
     booking: Booking,
     guest_name: Option<String>,
     guest_email: String,
+    /// Whether `crate::checkout` has a completed record for this booking.
+    checked_out: bool,
+    checkout_notes: Option<String>,
+    /// Present once a `crate::journal` entry exists for this booking.
+    journal_id: Option<Uuid>,
+    journal_status: Option<String>,
 }
 
 /// What a given caller is allowed to see about a booking.
@@ -89,6 +95,16 @@ pub struct BookingView {
     pub approved_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
+    /// Whether checkout has been completed for this booking. Same
+    /// visibility as `guest_name` etc. — the booking's owner and admins.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checked_out: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkout_notes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub journal_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub journal_status: Option<String>,
 }
 
 impl BookingRow {
@@ -119,14 +135,23 @@ impl BookingRow {
             approved_at: full.then_some(b.approved_at).flatten(),
             approved_by: full.then(|| b.approved_by.clone()).flatten(),
             created_at: full.then_some(b.created_at),
+            checked_out: full.then_some(self.checked_out),
+            checkout_notes: full.then(|| self.checkout_notes.clone()).flatten(),
+            journal_id: full.then_some(self.journal_id).flatten(),
+            journal_status: full.then(|| self.journal_status.clone()).flatten(),
         }
     }
 }
 
 fn select_rows() -> String {
     format!(
-        "SELECT {}, u.full_name AS guest_name, u.email AS guest_email
-         FROM bookings b JOIN users u ON u.id = b.user_id",
+        "SELECT {}, u.full_name AS guest_name, u.email AS guest_email, \
+                (bc.id IS NOT NULL) AS checked_out, bc.notes AS checkout_notes, \
+                je.id AS journal_id, je.status AS journal_status
+         FROM bookings b
+         JOIN users u ON u.id = b.user_id
+         LEFT JOIN booking_checkouts bc ON bc.booking_id = b.id
+         LEFT JOIN journal_entries je ON je.booking_id = b.id",
         BOOKING_COLUMNS
             .split(", ")
             .map(|c| format!("b.{c}"))
@@ -433,6 +458,10 @@ pub async fn create(
         booking,
         guest_name: user.full_name.clone(),
         guest_email: user.email.clone(),
+        checked_out: false,
+        checkout_notes: None,
+        journal_id: None,
+        journal_status: None,
     };
 
     Ok(Json(CreateResponse {

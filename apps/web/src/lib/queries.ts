@@ -1,12 +1,19 @@
 import { useQueries, useQuery } from '@tanstack/react-query';
 import { api } from './api';
 import type {
+  AdminCheckout,
+  AdminJournalEntry,
   AmenityItem,
   BlackoutDate,
   Booking,
+  ChecklistItem,
+  CheckoutEligibleBooking,
   GalleryPhoto,
   Holiday,
+  JournalEligibleBooking,
+  JournalEntry,
   Message,
+  PublicJournalPage,
   RuleItem,
   SiteContent,
   SpecialEvent,
@@ -113,6 +120,85 @@ export function useGalleryAdmin() {
     queryKey: ['admin-gallery'],
     queryFn: () => api<GalleryPhoto[]>('/admin/gallery'),
   });
+}
+
+// ── checkout checklist ──
+
+/** Active checklist items, for rendering the checkout form. */
+export function useChecklist() {
+  return useQuery({
+    queryKey: ['checklist'],
+    queryFn: () => api<ChecklistItem[]>('/checklist'),
+  });
+}
+
+/** Admin-only: every checklist item, including inactive ones. */
+export function useChecklistAdmin() {
+  return useQuery({
+    queryKey: ['admin-checklist'],
+    queryFn: () => api<ChecklistItem[]>('/admin/checklist'),
+  });
+}
+
+/** The caller's own checkout-eligible bookings — usually zero or one. */
+export function useCheckoutEligible() {
+  return useQuery({
+    queryKey: ['checkout-eligible'],
+    queryFn: () => api<CheckoutEligibleBooking[]>('/checkout/eligible'),
+  });
+}
+
+/** Admin-only: completed checkouts with per-item state and any notes. */
+export function useAdminCheckouts() {
+  return useQuery({
+    queryKey: ['admin-checkouts'],
+    queryFn: () => api<AdminCheckout[]>('/admin/checkouts'),
+  });
+}
+
+// ── camp journal ──
+
+/** Public, approved-only journal feed, paginated. */
+export function useJournalPublic(page = 1) {
+  return useQuery({
+    queryKey: ['journal-public', page],
+    queryFn: () => api<PublicJournalPage>(`/journal?page=${page}`, { anonymous: true }),
+  });
+}
+
+/** The caller's own journal entries, any status. */
+export function useJournalMine() {
+  return useQuery({
+    queryKey: ['journal-mine'],
+    queryFn: () => api<JournalEntry[]>('/journal/mine'),
+  });
+}
+
+/** Checked-out stays with no journal entry yet — drives /journal/new. */
+export function useJournalEligibleBookings() {
+  return useQuery({
+    queryKey: ['journal-eligible-bookings'],
+    queryFn: () => api<JournalEligibleBooking[]>('/journal/eligible-bookings'),
+  });
+}
+
+/** Admin-only: every journal entry, optionally filtered by status. */
+export function useJournalAdmin(status?: string) {
+  return useQuery({
+    queryKey: ['journal-admin', status ?? 'all'],
+    queryFn: () => api<AdminJournalEntry[]>(`/journal/admin${status ? `?status=${status}` : ''}`),
+  });
+}
+
+/** Pending-review count, for the admin panel's Journal tab badge. */
+export function useJournalPendingCount(enabled = true) {
+  const { data } = useQuery({
+    queryKey: ['journal-admin', 'pending'],
+    queryFn: () => api<AdminJournalEntry[]>('/journal/admin?status=pending'),
+    enabled,
+    refetchInterval: 120_000,
+  });
+  return data?.length ?? 0;
 }
 
 export function useMessages(all = false) {

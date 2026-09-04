@@ -11,6 +11,9 @@ import MyBookings from './routes/MyBookings';
 import Profile from './routes/Profile';
 import Inbox from './routes/Inbox';
 import Login from './routes/Login';
+import Checkout from './routes/Checkout';
+import Journal from './routes/Journal';
+import JournalNew from './routes/JournalNew';
 import AdminPanel from './routes/admin/AdminPanel';
 
 /** Sends signed-out visitors to /login, remembering where they were headed. */
@@ -71,6 +74,26 @@ export default function App() {
             element={
               <RequireAuth>
                 <Inbox />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/checkout"
+            element={
+              <RequireAuth>
+                <Checkout />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/journal"
+            element={<Journal />}
+          />
+          <Route
+            path="/journal/new"
+            element={
+              <RequireAuth>
+                <JournalNew />
               </RequireAuth>
             }
           />

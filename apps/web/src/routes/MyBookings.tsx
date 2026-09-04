@@ -2,7 +2,7 @@ import { Link } from 'react-router-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { differenceInCalendarDays } from 'date-fns';
 import { toast } from 'sonner';
-import { CalendarPlus, Dog, Tent, Users } from 'lucide-react';
+import { BookOpen, CalendarPlus, CheckCircle2, ClipboardCheck, Dog, Tent, Users } from 'lucide-react';
 import {
   Button,
   Card,
@@ -10,11 +10,12 @@ import {
   PageHeader,
   Spinner,
   StatusBadge,
+  cx,
 } from '../components/ui';
 import { api, ApiError } from '../lib/api';
 import { useBookings } from '../lib/queries';
 import { formatRange, nightCount, parseDay, pluralNights } from '../lib/dates';
-import type { Booking } from '../lib/types';
+import type { Booking, JournalStatus } from '../lib/types';
 
 /** "3 days until your stay!" — only for confirmed, future stays. */
 function countdown(b: Booking): string | null {
@@ -26,6 +27,17 @@ function countdown(b: Booking): string | null {
   return `${days} days until your stay!`;
 }
 
+/** Mirrors the server's checkout-eligibility rule (see checkout::is_checkout_eligible). */
+function isCheckoutEligible(b: Booking): boolean {
+  return b.status === 'approved' && !b.checked_out && b.check_out <= new Date().toISOString().slice(0, 10);
+}
+
+const JOURNAL_BADGE: Record<JournalStatus, { label: string; className: string }> = {
+  pending: { label: 'Pending review', className: 'border-amber-300 bg-amber-100 text-amber-900' },
+  approved: { label: 'Published', className: 'border-forest-300 bg-forest-100 text-forest-800' },
+  rejected: { label: 'Not published', className: 'border-sand bg-cream-dark text-muted' },
+};
+
 function BookingCard({ booking, onCancel, cancelling }: {
   booking: Booking;
   onCancel: (id: string) => void;
@@ -33,6 +45,7 @@ function BookingCard({ booking, onCancel, cancelling }: {
 }) {
   const soon = countdown(booking);
   const canCancel = booking.status === 'pending' || booking.status === 'approved';
+  const checkoutEligible = isCheckoutEligible(booking);
 
   return (
     <Card>
@@ -45,7 +58,24 @@ function BookingCard({ booking, onCancel, cancelling }: {
             {pluralNights(nightCount(booking.check_in, booking.check_out))}
           </p>
         </div>
-        <StatusBadge status={booking.status} />
+        <div className="flex flex-wrap items-center justify-end gap-1.5">
+          <StatusBadge status={booking.status} />
+          {booking.checked_out && (
+            <span className="inline-flex items-center gap-1 rounded-full border border-forest-300 bg-forest-100 px-2.5 py-0.5 text-xs font-semibold text-forest-800">
+              <CheckCircle2 size={12} /> Checked out
+            </span>
+          )}
+          {booking.journal_status && (
+            <span
+              className={cx(
+                'rounded-full border px-2.5 py-0.5 text-xs font-semibold',
+                JOURNAL_BADGE[booking.journal_status].className,
+              )}
+            >
+              {JOURNAL_BADGE[booking.journal_status].label}
+            </span>
+          )}
+        </div>
       </div>
 
       <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1.5 text-sm text-muted">
@@ -79,16 +109,39 @@ function BookingCard({ booking, onCancel, cancelling }: {
         </p>
       )}
 
-      {canCancel && (
-        <div className="mt-4 flex justify-end">
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={cancelling}
-            onClick={() => onCancel(booking.id)}
-          >
-            Cancel
-          </Button>
+      {(checkoutEligible || (booking.checked_out && !booking.journal_id) || booking.journal_status === 'pending' || canCancel) && (
+        <div className="mt-4 flex flex-wrap justify-end gap-2">
+          {checkoutEligible && (
+            <Link to="/checkout">
+              <Button size="sm">
+                <ClipboardCheck size={14} /> Complete Checkout
+              </Button>
+            </Link>
+          )}
+          {booking.checked_out && !booking.journal_id && (
+            <Link to={`/journal/new?booking_id=${booking.id}`}>
+              <Button size="sm" variant="secondary">
+                <BookOpen size={14} /> Share your story
+              </Button>
+            </Link>
+          )}
+          {booking.journal_status === 'pending' && booking.journal_id && (
+            <Link to={`/journal/new?entry_id=${booking.journal_id}`}>
+              <Button size="sm" variant="ghost">
+                View / edit story
+              </Button>
+            </Link>
+          )}
+          {canCancel && (
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={cancelling}
+              onClick={() => onCancel(booking.id)}
+            >
+              Cancel
+            </Button>
+          )}
         </div>
       )}
     </Card>
