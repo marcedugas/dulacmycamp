@@ -81,6 +81,16 @@ export interface SpecialEvent {
   created_at: string;
 }
 
+/**
+ * A US federal holiday, computed server-side for a given year — not an
+ * admin-created row like {@link SpecialEvent}. Reference-only: it carries no
+ * booking meaning and never affects availability or capacity.
+ */
+export interface Holiday {
+  date: string;
+  name: string;
+}
+
 export interface Message {
   id: string;
   subject: string | null;

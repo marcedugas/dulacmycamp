@@ -11,8 +11,8 @@ import {
   startOfMonth,
   startOfWeek,
 } from 'date-fns';
-import { ChevronLeft, ChevronRight, TriangleAlert } from 'lucide-react';
-import type { BlackoutDate, Booking, SpecialEvent } from '../lib/types';
+import { ChevronLeft, ChevronRight, Flag, TriangleAlert } from 'lucide-react';
+import type { BlackoutDate, Booking, Holiday, SpecialEvent } from '../lib/types';
 import { daysInclusive, nightsOf, parseDay, toKey } from '../lib/dates';
 import { Button, cx } from './ui';
 
@@ -33,12 +33,25 @@ export interface DayCell {
   events: SpecialEvent[];
   /** Adults on approved stays that night. */
   adults: number;
+  /**
+   * Reference-only US holiday marker, if any. Unlike every other field on
+   * this cell, this carries zero booking meaning — it never affects
+   * availability, capacity, or how the cell's ground color reads.
+   */
+  holiday: Holiday | null;
 }
 
-const EMPTY: DayCell = { approved: [], pending: [], blackout: null, events: [], adults: 0 };
+const EMPTY: DayCell = {
+  approved: [],
+  pending: [],
+  blackout: null,
+  events: [],
+  adults: 0,
+  holiday: null,
+};
 
 /**
- * Indexes bookings, blackouts and events by day key.
+ * Indexes bookings, blackouts, events and holidays by day key.
  *
  * A stay occupies its nights — check-in through the night before check-out —
  * so the departure day shows as free for the next guest.
@@ -47,12 +60,13 @@ export function buildIndex(
   bookings: Booking[],
   blackouts: BlackoutDate[],
   events: SpecialEvent[],
+  holidays: Holiday[] = [],
 ): Map<string, DayCell> {
   const map = new Map<string, DayCell>();
   const at = (key: string): DayCell => {
     let cell = map.get(key);
     if (!cell) {
-      cell = { approved: [], pending: [], blackout: null, events: [], adults: 0 };
+      cell = { approved: [], pending: [], blackout: null, events: [], adults: 0, holiday: null };
       map.set(key, cell);
     }
     return cell;
@@ -82,6 +96,10 @@ export function buildIndex(
     for (const d of daysInclusive(parseDay(ev.event_date), parseDay(end))) {
       at(toKey(d)).events.push(ev);
     }
+  }
+
+  for (const h of holidays) {
+    at(h.date).holiday = h;
   }
 
   return map;
@@ -152,7 +170,7 @@ function Day({ date, cell, dimmed, selected, isRangeEdge, capacityLimit, onClick
       onClick={() => onClick?.(key)}
       aria-label={`${format(date, 'EEEE, MMMM d, yyyy')}${
         cell.blackout ? ', unavailable' : cell.approved.length ? ', booked' : ', available'
-      }`}
+      }${cell.holiday ? `, ${cell.holiday.name}` : ''}`}
       aria-pressed={selected}
       className={cx(
         'relative flex min-h-[84px] flex-col items-stretch gap-1 rounded-lg border p-1.5 text-left transition',
@@ -164,15 +182,24 @@ function Day({ date, cell, dimmed, selected, isRangeEdge, capacityLimit, onClick
       )}
     >
       <div className="flex items-start justify-between">
-        <span
-          className={cx(
-            'text-xs font-bold',
-            today
-              ? 'grid h-5 w-5 place-items-center rounded-full bg-forest-600 text-cream'
-              : 'text-charcoal/70',
+        <span className="flex items-center gap-1">
+          <span
+            className={cx(
+              'text-xs font-bold',
+              today
+                ? 'grid h-5 w-5 place-items-center rounded-full bg-forest-600 text-cream'
+                : 'text-charcoal/70',
+            )}
+          >
+            {format(date, 'd')}
+          </span>
+          {/* Reference-only: a small outline flag, never a colored block —
+              nothing here should read as a booking-status signal. */}
+          {cell.holiday && (
+            <span title={cell.holiday.name} aria-hidden="true" className="text-wood-500">
+              <Flag size={10} strokeWidth={2.5} />
+            </span>
           )}
-        >
-          {format(date, 'd')}
         </span>
         <span className="flex items-center gap-0.5">
           {cell.events.map((ev) => (
@@ -189,6 +216,16 @@ function Day({ date, cell, dimmed, selected, isRangeEdge, capacityLimit, onClick
           )}
         </span>
       </div>
+
+      {/* Reference-only label — plain muted italic text, deliberately not a
+          colored pill like the status badges below, so it can never be
+          misread as availability. Always visible, so a tap needs no
+          interaction to reveal the name. */}
+      {cell.holiday && (
+        <span className="truncate text-[9px] italic text-wood-600" title={cell.holiday.name}>
+          {cell.holiday.name}
+        </span>
+      )}
 
       {cell.blackout && (
         <span className="rounded bg-charcoal/75 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-cream">
@@ -252,7 +289,11 @@ function YearGrid({
                 return (
                   <span
                     key={toKey(d)}
-                    title={format(d, 'MMM d, yyyy')}
+                    title={
+                      cell.holiday
+                        ? `${format(d, 'MMM d, yyyy')} — ${cell.holiday.name}`
+                        : format(d, 'MMM d, yyyy')
+                    }
                     className={cx(
                       'relative grid h-5 place-items-center rounded text-[10px] font-medium',
                       tone,
@@ -260,6 +301,12 @@ function YearGrid({
                     )}
                   >
                     {format(d, 'd')}
+                    {/* Corner dot, opposite the event dot and a different hue
+                        (wood, not bayou) — reference-only, never a booking
+                        signal. */}
+                    {cell.holiday && (
+                      <span className="absolute -left-px -top-px h-1.5 w-1.5 rounded-full bg-wood-500" />
+                    )}
                     {cell.events.length > 0 && (
                       <span className="absolute -right-px -top-px h-1.5 w-1.5 rounded-full bg-bayou-500" />
                     )}
@@ -292,6 +339,12 @@ export function Legend() {
           {i.label}
         </span>
       ))}
+      {/* Rendered as the same flag glyph the grid uses, not a color swatch —
+          the legend should teach "look for the icon", not "look for a
+          color", since holidays carry no availability meaning. */}
+      <span className="flex items-center gap-1.5">
+        <Flag size={12} className="text-wood-500" strokeWidth={2.5} /> Holiday (reference only)
+      </span>
       <span className="flex items-center gap-1.5">
         <TriangleAlert size={12} className="text-clay" /> Overlap / over capacity
       </span>
@@ -305,6 +358,8 @@ interface Props {
   bookings: Booking[];
   blackouts: BlackoutDate[];
   events: SpecialEvent[];
+  /** Reference-only US holiday markers — see [[useHolidays]]. */
+  holidays?: Holiday[];
   capacityLimit: number;
   view: CalendarView;
   onViewChange: (v: CalendarView) => void;
@@ -319,6 +374,7 @@ export default function CampCalendar({
   bookings,
   blackouts,
   events,
+  holidays = [],
   capacityLimit,
   view,
   onViewChange,
@@ -327,7 +383,10 @@ export default function CampCalendar({
   selection,
   onDayClick,
 }: Props) {
-  const index = useMemo(() => buildIndex(bookings, blackouts, events), [bookings, blackouts, events]);
+  const index = useMemo(
+    () => buildIndex(bookings, blackouts, events, holidays),
+    [bookings, blackouts, events, holidays],
+  );
   const days = useMemo(() => visibleDays(view, anchor), [view, anchor]);
 
   // A selection covers the nights of the stay: check-in through the night
