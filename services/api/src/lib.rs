@@ -42,7 +42,8 @@ pub struct Config {
     /// Public origin of this API. Used to build the approve/deny links that
     /// go into the owner's email, so it must be reachable from their inbox.
     pub api_base_url: String,
-    /// Camp owner (Jean). Receives the one-click approve/deny email.
+    /// Bootstrap fallback for the approve/deny email. The recipient list is
+    /// the `users.is_owner` flag; this is only used when no user carries it.
     pub owner_email: Option<String>,
     /// Admin notification address. Gets an informational copy, no buttons.
     pub admin_email: Option<String>,
@@ -164,6 +165,7 @@ pub fn router(state: Shared) -> Router {
         .route("/users/me", get(users::get_me).put(users::update_me))
         .route("/users", get(users::list_all))
         .route("/users/{id}/role", put(users::update_role))
+        .route("/users/{id}/owner", put(users::update_owner))
         // ── calendar annotations ──
         .route(
             "/blackout-dates",

@@ -23,6 +23,9 @@ pub struct User {
     pub boat_info: Option<String>,
     pub notes: Option<String>,
     pub role: String,
+    /// Receives the one-click approve/deny email. Any number of users may be
+    /// flagged; all of them get it.
+    pub is_owner: bool,
     pub avatar_url: Option<String>,
     pub last_login_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -46,7 +49,8 @@ impl User {
 
 /// Columns shared by every `users` read, so row shapes never drift.
 pub const USER_COLUMNS: &str = "id, email, full_name, phone, relationship, boat_info, notes, \
-                                role, avatar_url, last_login_at, created_at, updated_at";
+                                role, is_owner, avatar_url, last_login_at, created_at, \
+                                updated_at";
 
 pub async fn find_by_id(db: &sqlx::PgPool, id: Uuid) -> Result<Option<User>, sqlx::Error> {
     sqlx::query_as::<_, User>(&format!("SELECT {USER_COLUMNS} FROM users WHERE id = $1"))
@@ -72,6 +76,19 @@ pub async fn first_admin(db: &sqlx::PgPool) -> Result<Option<User>, sqlx::Error>
     ))
     .fetch_optional(db)
     .await
+}
+
+/// Every address flagged as a camp owner, oldest account first.
+///
+/// This is the source of truth for who receives the approve/deny email;
+/// `OWNER_EMAIL` is only consulted when this comes back empty. See
+/// [`crate::email::owner_recipients`].
+pub async fn owner_emails(db: &sqlx::PgPool) -> Result<Vec<String>, sqlx::Error> {
+    let rows: Vec<(String,)> =
+        sqlx::query_as("SELECT email FROM users WHERE is_owner = true ORDER BY created_at")
+            .fetch_all(db)
+            .await?;
+    Ok(rows.into_iter().map(|(email,)| email).collect())
 }
 
 // ─────────────────────────── handlers ───────────────────────────
@@ -133,7 +150,7 @@ pub async fn list_all(
 ) -> ApiResult<Json<Vec<UserWithStats>>> {
     let rows = sqlx::query_as::<_, UserWithStats>(
         "SELECT u.id, u.email, u.full_name, u.phone, u.relationship, u.boat_info, u.notes,
-                u.role, u.avatar_url, u.last_login_at, u.created_at, u.updated_at,
+                u.role, u.is_owner, u.avatar_url, u.last_login_at, u.created_at, u.updated_at,
                 count(b.id) AS booking_count
          FROM users u
          LEFT JOIN bookings b ON b.user_id = u.id
@@ -174,6 +191,34 @@ pub async fn update_role(
     ))
     .bind(id)
     .bind(&body.role)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::NotFound("User not found.".into()))?;
+
+    Ok(Json(updated))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateOwner {
+    pub is_owner: bool,
+}
+
+/// Flags or unflags a user as a camp owner.
+///
+/// Deliberately unrestricted in both directions: the camp can have several
+/// owners, and unflagging the last one is allowed — the send path falls back
+/// to `OWNER_EMAIL` and logs a warning rather than silently notifying nobody.
+pub async fn update_owner(
+    State(state): State<Shared>,
+    AdminUser(_): AdminUser,
+    Path(id): Path<Uuid>,
+    Json(body): Json<UpdateOwner>,
+) -> ApiResult<Json<User>> {
+    let updated = sqlx::query_as::<_, User>(&format!(
+        "UPDATE users SET is_owner = $2 WHERE id = $1 RETURNING {USER_COLUMNS}"
+    ))
+    .bind(id)
+    .bind(body.is_owner)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::NotFound("User not found.".into()))?;

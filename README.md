@@ -91,7 +91,7 @@ See [`.env.example`](.env.example) for the annotated list. The ones that matter:
 | `EMAIL_FROM_ADDRESS` | prod | Must be a Resend-verified domain |
 | `FRONTEND_URL` | prod | CORS origin + links inside emails |
 | `API_BASE_URL` | **prod** | Where approve/deny buttons point — must be reachable from the owner's inbox |
-| `OWNER_EMAIL` | **prod** | Jean. Without it, *nobody gets the approval email* |
+| `OWNER_EMAIL` | no | Bootstrap fallback only. Approval mail goes to every user flagged `is_owner` (admin panel → Users); this is used only when none is |
 | `ADMIN_EMAIL` | no | Informational copy |
 | `NOAA_STATION_ID` | no | Default `8762928` (Cocodrie) |
 | `CAPACITY_ADULTS` | no | Default `6` |
@@ -160,7 +160,10 @@ covered by unit tests, including a cross-check against the published September
 
 ## Before go-live
 
-- [ ] **Jean's email address** → `OWNER_EMAIL`. Nothing else unblocks approvals.
+- [x] **Jean's email address** — `jldugas@eatel.net`, flagged `is_owner` by
+      migration `0004`. Approvals are unblocked. (`OWNER_EMAIL` in production
+      still holds the old typo `jeanldugas@eatel.net`; it is now only a
+      fallback, but it should be corrected or cleared.)
 - [ ] **Verify a sending domain in Resend** and set `EMAIL_FROM_ADDRESS`.
 - [ ] **Real photos** — hero background and the four gallery slots in
       `apps/web/src/routes/Landing.tsx` are placeholders.

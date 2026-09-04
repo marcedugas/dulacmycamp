@@ -397,9 +397,9 @@ pub async fn create(
     let approve_url = format!("{}/api/bookings/approve/{token}", api_url(&state));
     let deny_url = format!("{}/api/bookings/deny/{token}", api_url(&state));
 
-    email::spawn_opt(
+    email::spawn_all(
         state.clone(),
-        state.cfg.owner_email.clone(),
+        email::owner_recipients(&state).await,
         email_templates::booking_request_to_owner(&booking, &guest_name, &approve_url, &deny_url),
     );
     email::spawn_opt(
@@ -781,7 +781,11 @@ pub async fn cancel(
         .clone()
         .unwrap_or_else(|| row.guest_email.clone());
     let notice = email_templates::booking_cancelled_notice(&booking, &guest);
-    email::spawn_opt(state.clone(), state.cfg.owner_email.clone(), notice.clone());
+    email::spawn_all(
+        state.clone(),
+        email::owner_recipients(&state).await,
+        notice.clone(),
+    );
     email::spawn_opt(state.clone(), state.cfg.admin_email.clone(), notice);
 
     Ok(Json(BookingRow { booking, ..row }.to_view(Some(&user))))

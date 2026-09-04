@@ -103,7 +103,7 @@ Set on **dulacmycamp-api**:
 | `JWT_SECRET` | 32 random bytes, generated at setup |
 | `API_BASE_URL` | the API's own public URL |
 | `FRONTEND_URL` | the web service's public URL |
-| `OWNER_EMAIL` | `laihafloyd@gmail.com` — **temporary**, see below |
+| `OWNER_EMAIL` | fallback only — see below |
 | `ADMIN_EMAIL` | `marc@recoresystems.net` |
 | `CAPACITY_ADULTS` | `6` |
 | `NOAA_STATION_ID` | `8762928` (Cocodrie) |
@@ -118,7 +118,15 @@ emails are dead, with nothing failing anywhere else.
 
 ## Still to do before real guests use it
 
-- [x] **`OWNER_EMAIL` → `jeanldugas@eatel.net`** — set 2026-09-04.
+- [x] **Booking approvals are database-driven** — the recipient list is the
+      `is_owner` flag on user accounts (admin panel → Users tab), seeded by
+      migration `0004` onto `jldugas@eatel.net`. `OWNER_EMAIL` is now only a
+      bootstrap fallback for a database with no owner flagged.
+- [ ] **Correct or clear `OWNER_EMAIL` in Railway.** It currently holds
+      `jeanldugas@eatel.net`, which is a typo — the real mailbox is
+      `jldugas@eatel.net`. Nothing reads it while an owner is flagged, so this
+      is no longer urgent, but a wrong fallback is worse than none:
+      `railway variables --service dulacmycamp-api --set OWNER_EMAIL=jldugas@eatel.net`
 - [x] **`RESEND_API_KEY` + `EMAIL_FROM_ADDRESS`** — set 2026-09-04, sending as
       `camp@recoresystems.net`. Mail is live; the API no longer falls back to
       logging messages.

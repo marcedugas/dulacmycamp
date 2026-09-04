@@ -12,6 +12,8 @@ export interface User {
   boat_info: string | null;
   notes: string | null;
   role: Role;
+  /** Receives the booking approve/deny email. Any number of users may be owners. */
+  is_owner: boolean;
   avatar_url: string | null;
   last_login_at: string | null;
   created_at: string;
