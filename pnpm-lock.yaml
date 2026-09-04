@@ -31,6 +31,9 @@ importers:
       react-router-dom:
         specifier: ^7.18.3
         version: 7.18.3(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      serve:
+        specifier: ^14.2.6
+        version: 14.2.6
       sonner:
         specifier: ^2.0.8
         version: 2.0.8(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -53,9 +56,6 @@ importers:
       oxlint:
         specifier: ^1.79.0
         version: 1.81.0
-      serve:
-        specifier: ^14.2.6
-        version: 14.2.6
       tailwindcss:
         specifier: ^4.3.3
         version: 4.3.3
