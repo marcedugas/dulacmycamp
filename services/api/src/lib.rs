@@ -10,6 +10,7 @@ pub mod bookings;
 pub mod email;
 pub mod email_templates;
 pub mod events;
+pub mod holidays;
 pub mod notifications;
 pub mod rate_limit;
 pub mod users;
@@ -172,6 +173,8 @@ pub fn router(state: Shared) -> Router {
         .route("/blackout-dates/{id}", delete(admin::delete_blackout))
         .route("/events", get(events::list).post(events::create))
         .route("/events/{id}", put(events::update).delete(events::remove))
+        // Reference-only, computed — never touches availability or capacity.
+        .route("/holidays", get(holidays::list))
         // ── inbox ──
         .route(
             "/messages",

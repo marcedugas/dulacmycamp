@@ -3,10 +3,10 @@ import { useNavigate } from 'react-router-dom';
 import { addDays } from 'date-fns';
 import { toast } from 'sonner';
 import { CalendarPlus, Download } from 'lucide-react';
-import CampCalendar, { Legend, buildIndex } from '../components/CampCalendar';
+import CampCalendar, { Legend, buildIndex, visibleDays } from '../components/CampCalendar';
 import type { CalendarView } from '../components/CampCalendar';
 import { Button, Card, PageHeader, Spinner } from '../components/ui';
-import { useCalendarData } from '../lib/queries';
+import { useCalendarData, useHolidays } from '../lib/queries';
 import { exportCalendarPdf } from '../lib/pdf';
 import { formatRange, parseDay, toKey } from '../lib/dates';
 
@@ -17,6 +17,18 @@ export default function CalendarPage() {
   const [view, setView] = useState<CalendarView>('month');
   const [anchor, setAnchor] = useState(new Date());
   const [range, setRange] = useState<{ start?: string; end?: string }>({});
+
+  // Year view renders all twelve months, whose week-aligned padding can spill
+  // a few days into the adjacent years; every other view only needs the
+  // year(s) its own visible days actually land in.
+  const holidayYears = useMemo(() => {
+    if (view === 'year') {
+      const y = anchor.getFullYear();
+      return [y - 1, y, y + 1];
+    }
+    return Array.from(new Set(visibleDays(view, anchor).map((d) => d.getFullYear())));
+  }, [view, anchor]);
+  const { data: holidays } = useHolidays(holidayYears);
 
   const index = useMemo(
     () => buildIndex(bookings, blackouts, events),
@@ -73,6 +85,7 @@ export default function CalendarPage() {
               bookings={bookings}
               blackouts={blackouts}
               events={events}
+              holidays={holidays}
               capacityLimit={capacityLimit}
               view={view}
               onViewChange={setView}

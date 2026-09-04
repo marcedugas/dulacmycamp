@@ -1,6 +1,6 @@
-import { useQuery } from '@tanstack/react-query';
+import { useQueries, useQuery } from '@tanstack/react-query';
 import { api } from './api';
-import type { BlackoutDate, Booking, Message, SpecialEvent, UserWithStats } from './types';
+import type { BlackoutDate, Booking, Holiday, Message, SpecialEvent, UserWithStats } from './types';
 
 export interface PublicConfig {
   camp_name: string;
@@ -47,6 +47,29 @@ export function useEvents() {
     queryKey: ['events'],
     queryFn: () => api<SpecialEvent[]>('/events', { anonymous: true }),
   });
+}
+
+/**
+ * Reference-only US holiday markers for whichever year(s) the calendar has
+ * on screen. One request per year, fetched in parallel and merged — each
+ * year's result is a pure computation, so it's cached forever and never
+ * refetched once seen.
+ */
+export function useHolidays(years: number[]) {
+  const uniqueYears = Array.from(new Set(years)).sort((a, b) => a - b);
+
+  const results = useQueries({
+    queries: uniqueYears.map((year) => ({
+      queryKey: ['holidays', year],
+      queryFn: () => api<Holiday[]>(`/holidays?year=${year}`, { anonymous: true }),
+      staleTime: Infinity,
+    })),
+  });
+
+  return {
+    data: results.flatMap((r) => r.data ?? []),
+    isLoading: results.some((r) => r.isLoading),
+  };
 }
 
 export function useMessages(all = false) {
