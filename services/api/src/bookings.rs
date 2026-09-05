@@ -810,13 +810,62 @@ pub async fn cancel(
         .guest_name
         .clone()
         .unwrap_or_else(|| row.guest_email.clone());
-    let notice = email_templates::booking_cancelled_notice(&booking, &guest);
-    email::spawn_all(
+
+    // Only a *confirmed* stay getting pulled needs the owner's attention —
+    // he never said yes to a merely-pending request, so there's nothing to
+    // walk back and no dates were actually held.
+    if should_notify_owner_of_cancellation(&row.booking.status) {
+        let cancelled_by = if row.booking.user_id == user.id {
+            "guest"
+        } else {
+            "admin"
+        };
+        email::spawn_all(
+            state.clone(),
+            email::owner_recipients(&state).await,
+            email_templates::booking_confirmed_cancelled_to_owner(&booking, &guest, cancelled_by),
+        );
+    }
+    email::spawn_opt(
         state.clone(),
-        email::owner_recipients(&state).await,
-        notice.clone(),
+        state.cfg.admin_email.clone(),
+        email_templates::booking_cancelled_notice(&booking, &guest),
     );
-    email::spawn_opt(state.clone(), state.cfg.admin_email.clone(), notice);
 
     Ok(Json(BookingRow { booking, ..row }.to_view(Some(&user))))
+}
+
+/// Whether cancelling a booking that was in `previous_status` should notify
+/// the owner — only when it had actually been approved. Pure so it's
+/// unit-testable without a database.
+fn should_notify_owner_of_cancellation(previous_status: &str) -> bool {
+    previous_status == "approved"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancelling_an_approved_booking_notifies_the_owner() {
+        assert!(should_notify_owner_of_cancellation("approved"));
+    }
+
+    #[test]
+    fn cancelling_a_pending_booking_does_not_notify_the_owner() {
+        assert!(!should_notify_owner_of_cancellation("pending"));
+    }
+
+    // `should_notify_owner_of_cancellation` only decides *whether* to
+    // notify; who actually receives it is `email::owner_recipients`, reused
+    // unchanged here rather than duplicated — its own fan-out to every
+    // is_owner=true account (same mechanism booking-submission notifications
+    // use) is already covered by `email::tests::every_flagged_user_is_a_recipient`.
+    #[test]
+    fn a_cancelled_or_denied_or_confirmed_booking_would_never_reach_this_check_again() {
+        // Sanity check on the literal the real code compares against —
+        // guards against a typo silently breaking the gate.
+        assert!(!should_notify_owner_of_cancellation("cancelled"));
+        assert!(!should_notify_owner_of_cancellation("denied"));
+    }
 }

@@ -300,6 +300,29 @@ pub fn booking_cancelled_notice(b: &Booking, guest: &str) -> Email {
     (subject, layout("Booking cancelled", &body, ""), text)
 }
 
+/// Sent to the owner(s) only — a pending request never had the owner's yes
+/// to walk back, so this fires solely when a previously-**approved** stay is
+/// cancelled. `cancelled_by` is the literal string `"guest"` or `"admin"`.
+pub fn booking_confirmed_cancelled_to_owner(b: &Booking, guest: &str, cancelled_by: &str) -> Email {
+    let subject = format!("{guest}'s confirmed stay was cancelled");
+    let mut rows = String::new();
+    rows.push_str(&row("Guest", &esc(guest)));
+    rows.push_str(&row(
+        "Dates now open",
+        &format!("{} &rarr; {}", pretty(b.check_in), pretty(b.check_out)),
+    ));
+    rows.push_str(&row("Cancelled by", cancelled_by));
+    let body = format!(
+        r#"<p style="margin:0 0 14px;">A confirmed stay was cancelled.</p><table role="presentation" cellpadding="0" cellspacing="0" style="margin:6px 0 4px;">{rows}</table>"#
+    );
+    let text = format!(
+        "{guest}'s confirmed stay was cancelled\n\nGuest: {guest}\nDates now open: {} - {}\nCancelled by: {cancelled_by}\n",
+        pretty(b.check_in),
+        pretty(b.check_out),
+    );
+    (subject, layout("Booking cancelled", &body, ""), text)
+}
+
 /// Standalone confirmation page rendered after a one-click owner action.
 /// Deliberately self-contained: the owner is in their mail client, not the app.
 pub fn action_result_page(heading: &str, detail: &str, ok: bool) -> String {
