@@ -201,23 +201,53 @@ pub fn booking_pending_to_guest(b: &Booking, app_url: &str) -> Email {
     (subject, layout("Request received", &body, &actions), text)
 }
 
-pub fn booking_confirmed_to_guest(b: &Booking, app_url: &str) -> Email {
+/// `checkin_items` is pulled at send time (see `checkin_info::all_for_email`)
+/// so the email always reflects current content, never a snapshot from
+/// whenever this template was written.
+pub fn booking_confirmed_to_guest(
+    b: &Booking,
+    checkin_items: &[(String, String)],
+    app_url: &str,
+) -> Email {
     let subject = "Your camp booking is confirmed! 🎣".to_string();
-    let body = format!(
+    let mut body = format!(
         r#"<p style="margin:0 0 14px;">Great news! Your booking at Dulac My Camp has been approved.</p>
 <p style="margin:0 0 14px;font-size:17px;"><strong>{} &rarr; {}</strong></p>
 <p style="margin:0;">See you at the camp!</p>"#,
         pretty(b.check_in),
         pretty(b.check_out)
     );
-    let actions = format!(
-        r#"<table role="presentation" cellpadding="0" cellspacing="0" style="margin:22px 0 4px;"><tr>{}</tr></table>"#,
-        button("View my bookings", &format!("{app_url}/my-bookings"), GREEN)
-    );
-    let text = format!(
+    let mut text = format!(
         "Your camp booking is confirmed!\n\nGreat news! Your booking at Dulac My Camp has been approved.\nDates: {} - {}\n\nSee you at the camp!\n",
         pretty(b.check_in),
         pretty(b.check_out)
+    );
+
+    if !checkin_items.is_empty() {
+        let mut items_html = String::new();
+        let mut items_text = String::new();
+        for (title, item_body) in checkin_items {
+            items_html.push_str(&format!(
+                r#"<div style="margin:0 0 14px;"><p style="margin:0 0 3px;font-weight:700;color:{CHARCOAL};">{}</p><p style="margin:0;color:#4a443b;">{}</p></div>"#,
+                esc(title),
+                esc(item_body)
+            ));
+            items_text.push_str(&format!("{title}\n{item_body}\n\n"));
+        }
+        body.push_str(&format!(
+            r#"<hr style="margin:20px 0;border:none;border-top:1px solid #ddd2c2;">
+<p style="margin:0 0 14px;font-weight:700;color:{CHARCOAL};">Here's what you need for your stay:</p>
+{items_html}
+<p style="margin:0;color:#6b6255;font-size:14px;">You can also find this anytime by logging in and visiting My Stay.</p>"#
+        ));
+        text.push_str(&format!(
+            "\nHere's what you need for your stay:\n\n{items_text}You can also find this anytime by logging in and visiting My Stay.\n"
+        ));
+    }
+
+    let actions = format!(
+        r#"<table role="presentation" cellpadding="0" cellspacing="0" style="margin:22px 0 4px;"><tr>{}</tr></table>"#,
+        button("View my bookings", &format!("{app_url}/my-bookings"), GREEN)
     );
     (subject, layout("Booking confirmed", &body, &actions), text)
 }

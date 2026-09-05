@@ -236,6 +236,41 @@ export interface AdminJournalEntry {
   check_out: string;
 }
 
+// ── check-in info / my stay ──
+
+/** Admin-only, full row (with sort_order) for the Check-In Info admin tab. */
+export interface CheckinInfoItem {
+  id: string;
+  title: string;
+  body: string;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** What a guest with active check-in access sees — no sort_order/timestamps. */
+export interface CheckinInfoGuestItem {
+  id: string;
+  title: string;
+  body: string;
+}
+
+/**
+ * The guest's most relevant booking for the My Stay hub. `has_stay: false`
+ * means no approved booking at all — every other field is then absent.
+ */
+export interface MyStay {
+  has_stay: boolean;
+  booking_id?: string;
+  check_in?: string;
+  check_out?: string;
+  guest_count_adults?: number;
+  guest_count_kids?: number;
+  checked_out?: boolean;
+  checkout_eligible?: boolean;
+  has_journal_entry?: boolean;
+}
+
 export interface Message {
   id: string;
   subject: string | null;

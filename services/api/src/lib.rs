@@ -7,6 +7,7 @@
 pub mod admin;
 pub mod auth;
 pub mod bookings;
+pub mod checkin_info;
 pub mod checklist;
 pub mod checkout;
 pub mod email;
@@ -14,6 +15,7 @@ pub mod email_templates;
 pub mod events;
 pub mod holidays;
 pub mod journal;
+pub mod my_stay;
 pub mod notifications;
 pub mod rate_limit;
 pub mod site_content;
@@ -262,6 +264,19 @@ pub fn router(state: Shared) -> Router {
         )
         .route("/journal/{id}/approve", put(journal::approve))
         .route("/journal/{id}/reject", put(journal::reject))
+        // ── check-in info ──
+        // Access is derived from booking state (approved, not yet checked
+        // out) — never a separate admin grant/revoke step.
+        .route("/checkin-info", get(checkin_info::list_for_guest))
+        .route(
+            "/admin/checkin-info",
+            get(checkin_info::list_admin).post(checkin_info::create),
+        )
+        .route(
+            "/admin/checkin-info/{id}",
+            put(checkin_info::update).delete(checkin_info::remove),
+        )
+        .route("/my-stay", get(my_stay::my_stay))
         // ── inbox ──
         .route(
             "/messages",

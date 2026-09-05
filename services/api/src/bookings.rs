@@ -486,10 +486,11 @@ async fn do_approve(state: &Shared, row: &BookingRow, actor: &str) -> ApiResult<
     .fetch_one(&state.db)
     .await?;
 
+    let checkin_items = crate::checkin_info::all_for_email(&state.db).await?;
     email::spawn(
         state.clone(),
         row.guest_email.clone(),
-        email_templates::booking_confirmed_to_guest(&booking, app_url(state)),
+        email_templates::booking_confirmed_to_guest(&booking, &checkin_items, app_url(state)),
     );
     notifications::system_message(
         &state.db,

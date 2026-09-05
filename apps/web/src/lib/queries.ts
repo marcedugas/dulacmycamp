@@ -6,6 +6,8 @@ import type {
   AmenityItem,
   BlackoutDate,
   Booking,
+  CheckinInfoGuestItem,
+  CheckinInfoItem,
   ChecklistItem,
   CheckoutEligibleBooking,
   GalleryPhoto,
@@ -13,6 +15,7 @@ import type {
   JournalEligibleBooking,
   JournalEntry,
   Message,
+  MyStay,
   PublicJournalPage,
   RuleItem,
   SiteContent,
@@ -199,6 +202,39 @@ export function useJournalPendingCount(enabled = true) {
     refetchInterval: 120_000,
   });
   return data?.length ?? 0;
+}
+
+// ── check-in info / my stay ──
+
+/**
+ * The guest's active check-in info, if any. 403s with no approved,
+ * not-yet-checked-out booking — treated as "no access" rather than an
+ * error, since that's an expected, common state, not a failure.
+ */
+export function useCheckinInfo() {
+  return useQuery({
+    queryKey: ['checkin-info'],
+    queryFn: () => api<CheckinInfoGuestItem[]>('/checkin-info'),
+    // A 403 here means "no active stay right now", not a transient failure —
+    // retrying it wastes three round trips before settling on the same answer.
+    retry: false,
+  });
+}
+
+/** Admin-only: every check-in info item, in order. */
+export function useCheckinInfoAdmin() {
+  return useQuery({
+    queryKey: ['admin-checkin-info'],
+    queryFn: () => api<CheckinInfoItem[]>('/admin/checkin-info'),
+  });
+}
+
+/** The guest's most relevant booking, for the My Stay hub. */
+export function useMyStay() {
+  return useQuery({
+    queryKey: ['my-stay'],
+    queryFn: () => api<MyStay>('/my-stay'),
+  });
 }
 
 export function useMessages(all = false) {

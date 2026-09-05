@@ -4,6 +4,7 @@ import { useJournalPendingCount } from '../../lib/queries';
 import { InboxView } from '../Inbox';
 import BookingsTab from './BookingsTab';
 import BlackoutTab from './BlackoutTab';
+import CheckinInfoTab from './CheckinInfoTab';
 import ChecklistTab from './ChecklistTab';
 import EventsTab from './EventsTab';
 import JournalTab from './JournalTab';
@@ -15,6 +16,7 @@ const TABS = [
   'Blackout Dates',
   'Events',
   'Checklist',
+  'Check-In Info',
   'Journal',
   'Site Content',
   'Users',
@@ -57,6 +59,7 @@ export default function AdminPanel() {
       {tab === 'Blackout Dates' && <BlackoutTab />}
       {tab === 'Events' && <EventsTab />}
       {tab === 'Checklist' && <ChecklistTab />}
+      {tab === 'Check-In Info' && <CheckinInfoTab />}
       {tab === 'Journal' && <JournalTab />}
       {tab === 'Site Content' && <SiteContentTab />}
       {tab === 'Users' && <UsersTab />}

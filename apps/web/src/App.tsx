@@ -14,6 +14,7 @@ import Login from './routes/Login';
 import Checkout from './routes/Checkout';
 import Journal from './routes/Journal';
 import JournalNew from './routes/JournalNew';
+import MyStay from './routes/MyStay';
 import AdminPanel from './routes/admin/AdminPanel';
 
 /** Sends signed-out visitors to /login, remembering where they were headed. */
@@ -82,6 +83,14 @@ export default function App() {
             element={
               <RequireAuth>
                 <Checkout />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/my-stay"
+            element={
+              <RequireAuth>
+                <MyStay />
               </RequireAuth>
             }
           />
