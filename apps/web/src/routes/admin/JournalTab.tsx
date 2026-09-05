@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { format } from 'date-fns';
 import { toast } from 'sonner';
-import { Check, X } from 'lucide-react';
+import { Archive, ArchiveRestore, Check, X } from 'lucide-react';
 import { Button, EmptyState, Modal, Spinner, Textarea, cx } from '../../components/ui';
 import { api, ApiError } from '../../lib/api';
 import { useJournalAdmin } from '../../lib/queries';
@@ -49,6 +49,24 @@ export default function JournalTab() {
       setRejecting(null);
       setReviewing(null);
       setReason('');
+      invalidate();
+    },
+    onError,
+  });
+
+  const archive = useMutation({
+    mutationFn: (id: string) => api(`/journal/${id}/archive`, { method: 'PUT' }),
+    onSuccess: () => {
+      toast.success('Story archived — hidden from the public feed.');
+      invalidate();
+    },
+    onError,
+  });
+
+  const unarchive = useMutation({
+    mutationFn: (id: string) => api(`/journal/${id}/unarchive`, { method: 'PUT' }),
+    onSuccess: () => {
+      toast.success('Story restored to the public feed.');
       invalidate();
     },
     onError,
@@ -106,14 +124,21 @@ export default function JournalTab() {
                   <td className="px-3 py-2.5 text-charcoal">{formatRange(e.check_in, e.check_out)}</td>
                   <td className="max-w-[220px] truncate px-3 py-2.5 text-charcoal">{e.title}</td>
                   <td className="px-3 py-2.5">
-                    <span
-                      className={cx(
-                        'inline-block rounded-full border px-2.5 py-0.5 text-xs font-semibold capitalize',
-                        STATUS_STYLES[e.status],
+                    <div className="flex flex-wrap gap-1">
+                      <span
+                        className={cx(
+                          'inline-block rounded-full border px-2.5 py-0.5 text-xs font-semibold capitalize',
+                          STATUS_STYLES[e.status],
+                        )}
+                      >
+                        {e.status}
+                      </span>
+                      {e.archived_at && (
+                        <span className="inline-block rounded-full border border-sand bg-cream-dark text-muted px-2.5 py-0.5 text-xs font-semibold">
+                          Archived
+                        </span>
                       )}
-                    >
-                      {e.status}
-                    </span>
+                    </div>
                   </td>
                   <td className="px-3 py-2.5 text-xs text-muted">
                     {format(new Date(e.created_at), 'MMM d, yyyy')}
@@ -123,6 +148,26 @@ export default function JournalTab() {
                       <Button size="sm" variant="ghost" onClick={() => setReviewing(e)}>
                         Review
                       </Button>
+                      {e.status === 'approved' && !e.archived_at && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={archive.isPending}
+                          onClick={() => archive.mutate(e.id)}
+                        >
+                          <Archive size={14} /> Archive
+                        </Button>
+                      )}
+                      {e.archived_at && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={unarchive.isPending}
+                          onClick={() => unarchive.mutate(e.id)}
+                        >
+                          <ArchiveRestore size={14} /> Unarchive
+                        </Button>
+                      )}
                     </div>
                   </td>
                 </tr>

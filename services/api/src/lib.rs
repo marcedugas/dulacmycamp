@@ -264,6 +264,8 @@ pub fn router(state: Shared) -> Router {
         )
         .route("/journal/{id}/approve", put(journal::approve))
         .route("/journal/{id}/reject", put(journal::reject))
+        .route("/journal/{id}/archive", put(journal::archive))
+        .route("/journal/{id}/unarchive", put(journal::unarchive))
         // ── check-in info ──
         // Access is derived from booking state (approved, not yet checked
         // out) — never a separate admin grant/revoke step.

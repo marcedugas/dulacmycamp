@@ -191,6 +191,7 @@ export interface JournalEntry {
   rejected_reason: string | null;
   approved_at: string | null;
   approved_by: string | null;
+  archived_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -230,6 +231,8 @@ export interface AdminJournalEntry {
   created_at: string;
   approved_at: string | null;
   approved_by: string | null;
+  /** Set when an admin has hidden this entry from the public feed; independent of status. */
+  archived_at: string | null;
   guest_name: string | null;
   guest_email: string;
   check_in: string;

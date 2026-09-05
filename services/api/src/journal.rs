@@ -87,12 +87,26 @@ pub struct JournalEntry {
     pub rejected_reason: Option<String>,
     pub approved_at: Option<DateTime<Utc>>,
     pub approved_by: Option<String>,
+    /// Set when an admin has quietly hidden this entry from the public feed
+    /// without un-approving it. Independent of `status`.
+    pub archived_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
 const ENTRY_COLUMNS: &str = "id, user_id, booking_id, title, body, status, rejected_reason, \
-                             approved_at, approved_by, created_at, updated_at";
+                             approved_at, approved_by, archived_at, created_at, updated_at";
+
+/// Only an approved entry can be archived — pending/rejected entries were
+/// never on the public feed in the first place, so there's nothing to hide.
+fn require_archivable(status: &str) -> ApiResult<()> {
+    if status != "approved" {
+        return Err(AppError::Conflict(format!(
+            "Only approved entries can be archived (this one is {status})."
+        )));
+    }
+    Ok(())
+}
 
 // ─────────────────────────── public feed ───────────────────────────
 
@@ -141,7 +155,7 @@ pub async fn list_public(
          FROM journal_entries je
          JOIN users u ON u.id = je.user_id
          JOIN bookings b ON b.id = je.booking_id
-         WHERE je.status = 'approved'
+         WHERE je.status = 'approved' AND je.archived_at IS NULL
          ORDER BY je.approved_at DESC NULLS LAST, je.created_at DESC
          LIMIT $1 OFFSET $2",
     )
@@ -150,10 +164,11 @@ pub async fn list_public(
     .fetch_all(&state.db)
     .await?;
 
-    let (total,): (i64,) =
-        sqlx::query_as("SELECT count(*) FROM journal_entries WHERE status = 'approved'")
-            .fetch_one(&state.db)
-            .await?;
+    let (total,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM journal_entries WHERE status = 'approved' AND archived_at IS NULL",
+    )
+    .fetch_one(&state.db)
+    .await?;
 
     let entries: Vec<PublicEntry> = rows
         .into_iter()
@@ -393,6 +408,7 @@ pub struct AdminEntry {
     pub created_at: DateTime<Utc>,
     pub approved_at: Option<DateTime<Utc>>,
     pub approved_by: Option<String>,
+    pub archived_at: Option<DateTime<Utc>>,
     pub guest_name: Option<String>,
     pub guest_email: String,
     pub check_in: NaiveDate,
@@ -412,7 +428,7 @@ pub async fn admin_list(
     Query(q): Query<AdminListQuery>,
 ) -> ApiResult<Json<Vec<AdminEntry>>> {
     let mut sql = "SELECT je.id, je.title, je.body, je.status, je.rejected_reason,
-                          je.created_at, je.approved_at, je.approved_by,
+                          je.created_at, je.approved_at, je.approved_by, je.archived_at,
                           u.full_name AS guest_name, u.email AS guest_email,
                           b.check_in, b.check_out
                    FROM journal_entries je
@@ -556,6 +572,53 @@ pub async fn reject(
     Ok(Json(entry))
 }
 
+/// `PUT /api/journal/{id}/archive` — admin only. Quiet housekeeping: hides an
+/// approved entry from the public feed without touching `status` or
+/// emailing the guest. Only valid on already-approved entries.
+pub async fn archive(
+    State(state): State<Shared>,
+    AdminUser(_admin): AdminUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<JournalEntry>> {
+    let existing = sqlx::query_as::<_, JournalEntry>(&format!(
+        "SELECT {ENTRY_COLUMNS} FROM journal_entries WHERE id = $1"
+    ))
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Journal entry not found.".into()))?;
+    require_archivable(&existing.status)?;
+
+    let entry = sqlx::query_as::<_, JournalEntry>(&format!(
+        "UPDATE journal_entries SET archived_at = now(), updated_at = now()
+         WHERE id = $1 RETURNING {ENTRY_COLUMNS}"
+    ))
+    .bind(id)
+    .fetch_one(&state.db)
+    .await?;
+
+    Ok(Json(entry))
+}
+
+/// `PUT /api/journal/{id}/unarchive` — admin only. The reverse of
+/// [`archive`]; also silent, no email.
+pub async fn unarchive(
+    State(state): State<Shared>,
+    AdminUser(_admin): AdminUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<JournalEntry>> {
+    let entry = sqlx::query_as::<_, JournalEntry>(&format!(
+        "UPDATE journal_entries SET archived_at = NULL, updated_at = now()
+         WHERE id = $1 RETURNING {ENTRY_COLUMNS}"
+    ))
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Journal entry not found.".into()))?;
+
+    Ok(Json(entry))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -648,6 +711,17 @@ mod tests {
             require_no_existing_entry(true),
             Err(AppError::Conflict(_))
         ));
+    }
+
+    #[test]
+    fn only_an_approved_entry_can_be_archived() {
+        assert!(require_archivable("approved").is_ok());
+        for status in ["pending", "rejected"] {
+            assert!(matches!(
+                require_archivable(status),
+                Err(AppError::Conflict(_))
+            ));
+        }
     }
 
     #[test]
