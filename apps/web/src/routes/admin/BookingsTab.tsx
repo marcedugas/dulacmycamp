@@ -1,12 +1,14 @@
 import { useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { format } from 'date-fns';
+import { addDays, format } from 'date-fns';
 import { toast } from 'sonner';
-import { Check, CheckCircle2, Dog, Flag, TriangleAlert, X } from 'lucide-react';
+import { Check, CheckCircle2, Dog, Flag, Plus, TriangleAlert, X } from 'lucide-react';
 import {
   Button,
   Card,
   EmptyState,
+  Field,
+  Input,
   Modal,
   Spinner,
   StatusBadge,
@@ -14,9 +16,9 @@ import {
   cx,
 } from '../../components/ui';
 import { api, ApiError } from '../../lib/api';
-import { useAdminCheckouts, useBookings } from '../../lib/queries';
-import { formatRange, nightCount, parseDay, pluralNights } from '../../lib/dates';
-import type { AdminCheckout, Booking, BookingStatus } from '../../lib/types';
+import { useAdminCheckouts, useBookings, useUsers } from '../../lib/queries';
+import { formatRange, nightCount, parseDay, pluralNights, toKey } from '../../lib/dates';
+import type { AdminCheckout, Booking, BookingStatus, CreateBookingResponse } from '../../lib/types';
 
 const STATUSES: (BookingStatus | 'all')[] = ['all', 'pending', 'approved', 'denied', 'cancelled'];
 
@@ -37,6 +39,200 @@ function findOverlaps(bookings: Booking[]): Set<string> {
   return clashing;
 }
 
+/**
+ * For a stay arranged outside the app (phone call, in person). Submits to
+ * `POST /api/admin/bookings`, which reuses the exact same booking-creation
+ * logic `/book` does — same validation, blackout/overlap/capacity handling,
+ * and full email chain — so the overlap/capacity warning here reads the
+ * identical `CreateBookingResponse` shape the guest-facing form does.
+ */
+function AddBookingModal({
+  open,
+  onClose,
+  onCreated,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const { data: users } = useUsers();
+  const today = toKey(new Date());
+
+  const [email, setEmail] = useState('');
+  const [fullName, setFullName] = useState('');
+  const [checkIn, setCheckIn] = useState(today);
+  const [checkOut, setCheckOut] = useState(toKey(addDays(new Date(), 2)));
+  const [adults, setAdults] = useState(2);
+  const [kids, setKids] = useState(0);
+  const [pets, setPets] = useState(false);
+  const [requests, setRequests] = useState('');
+  const [result, setResult] = useState<CreateBookingResponse | null>(null);
+
+  const trimmedEmail = email.trim().toLowerCase();
+  const matchedUser = trimmedEmail
+    ? (users ?? []).find((u) => u.email.toLowerCase() === trimmedEmail)
+    : undefined;
+  const isNewGuest = trimmedEmail.length > 3 && trimmedEmail.includes('@') && !matchedUser;
+
+  const reset = () => {
+    setEmail('');
+    setFullName('');
+    setCheckIn(today);
+    setCheckOut(toKey(addDays(new Date(), 2)));
+    setAdults(2);
+    setKids(0);
+    setPets(false);
+    setRequests('');
+    setResult(null);
+  };
+
+  const create = useMutation({
+    mutationFn: () =>
+      api<CreateBookingResponse>('/admin/bookings', {
+        method: 'POST',
+        body: {
+          email: trimmedEmail,
+          full_name: fullName.trim() || null,
+          check_in: checkIn,
+          check_out: checkOut,
+          guest_count_adults: adults,
+          guest_count_kids: kids,
+          has_pets: pets,
+          other_requests: requests.trim() || null,
+        },
+      }),
+    onSuccess: (res) => {
+      setResult(res);
+      onCreated();
+      toast.success('Booking entered — it now needs the owner’s approval, same as any other request.');
+    },
+    onError: (err) => toast.error(err instanceof ApiError ? err.message : 'Could not create that booking.'),
+  });
+
+  const close = () => {
+    onClose();
+    reset();
+  };
+
+  const valid = Boolean(trimmedEmail.includes('@') && checkIn && checkOut && checkOut > checkIn);
+
+  return (
+    <Modal open={open} onClose={close} title="Add a booking">
+      {result ? (
+        <div className="space-y-4 text-sm">
+          <p className="text-charcoal">
+            Entered as <strong>pending</strong> for {formatRange(result.booking.check_in, result.booking.check_out)}
+            . It'll show up in the Bookings table like any other request and still needs the owner's approval.
+          </p>
+          {result.warning && (
+            <p className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-amber-900">
+              {result.warning}
+            </p>
+          )}
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={reset}>
+              Add another
+            </Button>
+            <Button onClick={close}>Done</Button>
+          </div>
+        </div>
+      ) : (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            create.mutate();
+          }}
+          className="space-y-4"
+        >
+          <Field label="Guest email">
+            <Input
+              type="email"
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="guest@example.com"
+            />
+          </Field>
+          {trimmedEmail.includes('@') && (
+            <p className="-mt-2 text-xs font-semibold text-muted">
+              {matchedUser
+                ? `Existing guest: ${matchedUser.full_name ?? matchedUser.email}`
+                : 'New guest — an account will be created for them.'}
+            </p>
+          )}
+          {isNewGuest && (
+            <Field label="Guest name" hint="Optional — only used since this is a new guest.">
+              <Input value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder="Full name" />
+            </Field>
+          )}
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Check in">
+              <Input
+                type="date"
+                required
+                value={checkIn}
+                onChange={(e) => setCheckIn(e.target.value)}
+              />
+            </Field>
+            <Field label="Check out">
+              <Input
+                type="date"
+                required
+                value={checkOut}
+                onChange={(e) => setCheckOut(e.target.value)}
+              />
+            </Field>
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Adults">
+              <Input
+                type="number"
+                min={1}
+                required
+                value={adults}
+                onChange={(e) => setAdults(Number(e.target.value))}
+              />
+            </Field>
+            <Field label="Kids">
+              <Input
+                type="number"
+                min={0}
+                value={kids}
+                onChange={(e) => setKids(Number(e.target.value))}
+              />
+            </Field>
+          </div>
+
+          <label className="flex items-center gap-2 text-sm text-charcoal">
+            <input
+              type="checkbox"
+              checked={pets}
+              onChange={(e) => setPets(e.target.checked)}
+              className="h-4 w-4 rounded border-sand text-forest-600 focus:ring-forest-500"
+            />
+            Bringing pets
+          </label>
+
+          <Field label="Other requests" hint="Optional">
+            <Textarea rows={2} value={requests} onChange={(e) => setRequests(e.target.value)} />
+          </Field>
+
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="ghost" onClick={close}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={!valid || create.isPending}>
+              {create.isPending ? 'Submitting…' : 'Add booking'}
+            </Button>
+          </div>
+        </form>
+      )}
+    </Modal>
+  );
+}
+
 export default function BookingsTab() {
   const { data, isLoading } = useBookings();
   const queryClient = useQueryClient();
@@ -48,6 +244,7 @@ export default function BookingsTab() {
   const [reason, setReason] = useState('');
   const [details, setDetails] = useState<Booking | null>(null);
   const [viewingCheckout, setViewingCheckout] = useState<Booking | null>(null);
+  const [adding, setAdding] = useState(false);
   const { data: checkouts } = useAdminCheckouts();
   const checkoutDetail: AdminCheckout | undefined = viewingCheckout
     ? checkouts?.find((c) => c.booking_id === viewingCheckout.id)
@@ -139,6 +336,9 @@ export default function BookingsTab() {
             className="ml-2 rounded-lg border border-sand bg-white px-2 py-1.5 text-sm"
           />
         </label>
+        <Button size="sm" className="ml-auto" onClick={() => setAdding(true)}>
+          <Plus size={14} /> Add Booking
+        </Button>
       </div>
 
       {filtered.length === 0 ? (
@@ -338,6 +538,8 @@ export default function BookingsTab() {
           </div>
         )}
       </Modal>
+
+      <AddBookingModal open={adding} onClose={() => setAdding(false)} onCreated={invalidate} />
     </>
   );
 }

@@ -91,6 +91,28 @@ pub async fn owner_emails(db: &sqlx::PgPool) -> Result<Vec<String>, sqlx::Error>
     Ok(rows.into_iter().map(|(email,)| email).collect())
 }
 
+/// Looks up a guest by email, creating one if none exists — the same
+/// self-registration an OTP request performs, just triggered by an admin
+/// entering a booking on someone's behalf instead of the guest logging in
+/// themselves. Never overwrites `full_name` on an existing account.
+pub async fn find_or_create_guest(
+    db: &sqlx::PgPool,
+    email: &str,
+    full_name: Option<&str>,
+) -> Result<User, sqlx::Error> {
+    let email = email.trim().to_lowercase();
+    if let Some(existing) = find_by_email(db, &email).await? {
+        return Ok(existing);
+    }
+    sqlx::query_as::<_, User>(&format!(
+        "INSERT INTO users (email, full_name) VALUES ($1, $2) RETURNING {USER_COLUMNS}"
+    ))
+    .bind(&email)
+    .bind(full_name.map(str::trim).filter(|n| !n.is_empty()))
+    .fetch_one(db)
+    .await
+}
+
 // ─────────────────────────── handlers ───────────────────────────
 
 pub async fn get_me(AuthUser(user): AuthUser) -> Json<User> {

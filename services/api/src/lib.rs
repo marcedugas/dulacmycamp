@@ -181,6 +181,9 @@ pub fn router(state: Shared) -> Router {
         .route("/bookings/{id}/cancel", put(bookings::cancel))
         .route("/bookings/{id}/approve", put(bookings::admin_approve))
         .route("/bookings/{id}/deny", put(bookings::admin_deny))
+        // Admin entering a booking on a guest's behalf (phone call, in
+        // person) — reuses bookings::create_booking_for verbatim.
+        .route("/admin/bookings", post(bookings::admin_create))
         // ── users ──
         .route("/users/me", get(users::get_me).put(users::update_me))
         .route("/users", get(users::list_all))

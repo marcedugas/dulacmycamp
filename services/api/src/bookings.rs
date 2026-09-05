@@ -292,7 +292,7 @@ async fn approved_adults(
 
 // ─────────────────────────── create ───────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, PartialEq, Deserialize)]
 pub struct CreateBooking {
     pub check_in: NaiveDate,
     pub check_out: NaiveDate,
@@ -318,6 +318,24 @@ pub async fn create(
     AuthUser(user): AuthUser,
     Json(body): Json<CreateBooking>,
 ) -> ApiResult<Json<CreateResponse>> {
+    Ok(Json(create_booking_for(&state, &user, body).await?))
+}
+
+/// The actual booking-creation logic: validation, blackout check,
+/// overlap/capacity flagging, the insert, and the full email chain
+/// (guest confirmation, owner approve/deny, admin notification).
+///
+/// Shared verbatim by [`create`] (a guest submitting their own request) and
+/// `admin::create_booking` (an admin entering one on a guest's behalf) —
+/// the only thing that differs between the two call sites is which `User`
+/// is passed in as the acting guest. Nothing here treats an admin-entered
+/// booking any differently: it still starts `pending` and still requires
+/// real owner approval.
+pub async fn create_booking_for(
+    state: &Shared,
+    user: &User,
+    body: CreateBooking,
+) -> ApiResult<CreateResponse> {
     if body.check_out <= body.check_in {
         return Err(AppError::BadRequest(
             "Check-out must be after check-in.".into(),
@@ -419,23 +437,23 @@ pub async fn create(
 
     // ── notifications ──
     let guest_name = user.display_name();
-    let approve_url = format!("{}/api/bookings/approve/{token}", api_url(&state));
-    let deny_url = format!("{}/api/bookings/deny/{token}", api_url(&state));
+    let approve_url = format!("{}/api/bookings/approve/{token}", api_url(state));
+    let deny_url = format!("{}/api/bookings/deny/{token}", api_url(state));
 
     email::spawn_all(
         state.clone(),
-        email::owner_recipients(&state).await,
+        email::owner_recipients(state).await,
         email_templates::booking_request_to_owner(&booking, &guest_name, &approve_url, &deny_url),
     );
     email::spawn_opt(
         state.clone(),
         state.cfg.admin_email.clone(),
-        email_templates::booking_request_to_admin(&booking, &guest_name, app_url(&state)),
+        email_templates::booking_request_to_admin(&booking, &guest_name, app_url(state)),
     );
     email::spawn(
         state.clone(),
         user.email.clone(),
-        email_templates::booking_pending_to_guest(&booking, app_url(&state)),
+        email_templates::booking_pending_to_guest(&booking, app_url(state)),
     );
 
     // Mirror the owner notification into the admin's in-app inbox.
@@ -464,11 +482,68 @@ pub async fn create(
         journal_status: None,
     };
 
-    Ok(Json(CreateResponse {
-        booking: row.to_view(Some(&user)),
+    Ok(CreateResponse {
+        booking: row.to_view(Some(user)),
         warning: (!warnings.is_empty()).then(|| warnings.join(" ")),
         capacity,
-    }))
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AdminCreateBooking {
+    pub email: String,
+    /// Only used if this creates a new user — never overwrites an existing
+    /// account's name.
+    pub full_name: Option<String>,
+    pub check_in: NaiveDate,
+    pub check_out: NaiveDate,
+    pub guest_count_adults: i32,
+    #[serde(default)]
+    pub guest_count_kids: i32,
+    #[serde(default)]
+    pub has_pets: bool,
+    pub other_requests: Option<String>,
+}
+
+/// The only place `AdminCreateBooking` and `CreateBooking` are made to line
+/// up — proof the admin path feeds [`create_booking_for`] the exact same
+/// shape a guest's own `/book` submission would, field for field.
+impl From<AdminCreateBooking> for CreateBooking {
+    fn from(admin: AdminCreateBooking) -> Self {
+        CreateBooking {
+            check_in: admin.check_in,
+            check_out: admin.check_out,
+            guest_count_adults: admin.guest_count_adults,
+            guest_count_kids: admin.guest_count_kids,
+            has_pets: admin.has_pets,
+            other_requests: admin.other_requests,
+        }
+    }
+}
+
+/// `POST /api/admin/bookings` — admin only. For a stay arranged outside the
+/// app (phone call, in person) that still needs to go through the normal
+/// approval flow. This is *not* a simplified or parallel path: it looks up
+/// or creates the guest's account exactly as OTP self-registration would,
+/// then calls [`create_booking_for`] — the identical validation, blackout
+/// check, overlap/capacity flagging, and email chain a guest submitting
+/// `/book` themselves gets, just with the admin acting on their behalf. The
+/// booking still lands `pending` and still needs real owner approval.
+pub async fn admin_create(
+    State(state): State<Shared>,
+    AdminUser(_admin): AdminUser,
+    Json(body): Json<AdminCreateBooking>,
+) -> ApiResult<Json<CreateResponse>> {
+    let email = body.email.trim();
+    if !email.contains('@') || email.len() < 5 {
+        return Err(AppError::BadRequest(
+            "Enter a valid guest email address.".into(),
+        ));
+    }
+
+    let guest = users::find_or_create_guest(&state.db, email, body.full_name.as_deref()).await?;
+
+    Ok(Json(create_booking_for(&state, &guest, body.into()).await?))
 }
 
 // ─────────────────────────── state transitions ───────────────────────────
@@ -867,5 +942,36 @@ mod tests {
         // guards against a typo silently breaking the gate.
         assert!(!should_notify_owner_of_cancellation("cancelled"));
         assert!(!should_notify_owner_of_cancellation("denied"));
+    }
+
+    // Both `create()` (a guest's own /book submission) and `admin_create()`
+    // (an admin entering one on a guest's behalf) end by calling the exact
+    // same `create_booking_for()` — the one function that contains every
+    // email::spawn* call in booking creation. There is no second,
+    // admin-specific code path for that email chain to drift from; the only
+    // thing that could make the two diverge is this From impl silently
+    // dropping or mis-mapping a field on the way in, which is what this
+    // test guards against.
+    #[test]
+    fn admin_create_feeds_create_booking_for_the_identical_request_a_guest_submission_would() {
+        let admin_input = AdminCreateBooking {
+            email: "guest@example.com".into(),
+            full_name: Some("Jean Guest".into()),
+            check_in: NaiveDate::from_ymd_opt(2026, 10, 1).unwrap(),
+            check_out: NaiveDate::from_ymd_opt(2026, 10, 5).unwrap(),
+            guest_count_adults: 3,
+            guest_count_kids: 2,
+            has_pets: true,
+            other_requests: Some("Bringing a boat trailer".into()),
+        };
+        let expected = CreateBooking {
+            check_in: NaiveDate::from_ymd_opt(2026, 10, 1).unwrap(),
+            check_out: NaiveDate::from_ymd_opt(2026, 10, 5).unwrap(),
+            guest_count_adults: 3,
+            guest_count_kids: 2,
+            has_pets: true,
+            other_requests: Some("Bringing a boat trailer".into()),
+        };
+        assert_eq!(CreateBooking::from(admin_input), expected);
     }
 }
