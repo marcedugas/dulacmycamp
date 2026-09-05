@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom';
 import { BookOpen, ClipboardCheck, KeyRound, Tent, Users } from 'lucide-react';
-import { Button, Card, EmptyState, PageHeader, Spinner } from '../components/ui';
+import { Button, Card, EmptyState, JournalStatusBadge, PageHeader, Spinner } from '../components/ui';
 import { useCheckinInfo, useMyStay } from '../lib/queries';
 import { formatRange, nightCount, pluralNights } from '../lib/dates';
 
@@ -51,8 +51,8 @@ export default function MyStay() {
           {Boolean(stay.guest_count_kids) && `, ${stay.guest_count_kids} kids`}
         </p>
 
-        {(stay.checkout_eligible || (stay.checked_out && !stay.has_journal_entry)) && (
-          <div className="mt-4 flex flex-wrap gap-2">
+        {(stay.checkout_eligible || stay.journal_eligible || stay.journal_status) && (
+          <div className="mt-4 flex flex-wrap items-center gap-2">
             {stay.checkout_eligible && (
               <Link to="/checkout">
                 <Button>
@@ -60,13 +60,14 @@ export default function MyStay() {
                 </Button>
               </Link>
             )}
-            {stay.checked_out && !stay.has_journal_entry && (
+            {stay.journal_eligible && (
               <Link to={`/journal/new?booking_id=${stay.booking_id}`}>
                 <Button variant="secondary">
                   <BookOpen size={16} /> Share your story
                 </Button>
               </Link>
             )}
+            {stay.journal_status && <JournalStatusBadge status={stay.journal_status} />}
           </div>
         )}
       </Card>

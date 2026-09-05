@@ -268,7 +268,10 @@ export interface MyStay {
   guest_count_kids?: number;
   checked_out?: boolean;
   checkout_eligible?: boolean;
-  has_journal_entry?: boolean;
+  /** Whether "/journal/new" should be offered — false once journal_status is set. */
+  journal_eligible?: boolean;
+  /** Set once an entry exists for this booking; show a status badge instead of the button. */
+  journal_status?: JournalStatus;
 }
 
 export interface Message {

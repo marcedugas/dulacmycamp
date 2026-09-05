@@ -1,7 +1,7 @@
 import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode, TextareaHTMLAttributes } from 'react';
 import { useEffect } from 'react';
 import { X } from 'lucide-react';
-import type { BookingStatus } from '../lib/types';
+import type { BookingStatus, JournalStatus } from '../lib/types';
 
 export function cx(...parts: (string | false | null | undefined)[]): string {
   return parts.filter(Boolean).join(' ');
@@ -155,6 +155,22 @@ export function StatusBadge({ status }: { status: BookingStatus }) {
       )}
     >
       {status}
+    </span>
+  );
+}
+
+const JOURNAL_STATUS: Record<JournalStatus, { label: string; className: string }> = {
+  pending: { label: 'Pending review', className: 'border-amber-300 bg-amber-100 text-amber-900' },
+  approved: { label: 'Published', className: 'border-forest-300 bg-forest-100 text-forest-800' },
+  rejected: { label: 'Not published', className: 'border-sand bg-cream-dark text-muted' },
+};
+
+/** Same badge shape as {@link StatusBadge}, for a journal entry's review status. */
+export function JournalStatusBadge({ status }: { status: JournalStatus }) {
+  const { label, className } = JOURNAL_STATUS[status];
+  return (
+    <span className={cx('rounded-full border px-2.5 py-0.5 text-xs font-semibold', className)}>
+      {label}
     </span>
   );
 }

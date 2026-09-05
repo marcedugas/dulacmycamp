@@ -7,15 +7,15 @@ import {
   Button,
   Card,
   EmptyState,
+  JournalStatusBadge,
   PageHeader,
   Spinner,
   StatusBadge,
-  cx,
 } from '../components/ui';
 import { api, ApiError } from '../lib/api';
 import { useBookings } from '../lib/queries';
 import { formatRange, nightCount, parseDay, pluralNights } from '../lib/dates';
-import type { Booking, JournalStatus } from '../lib/types';
+import type { Booking } from '../lib/types';
 
 /** "3 days until your stay!" — only for confirmed, future stays. */
 function countdown(b: Booking): string | null {
@@ -27,16 +27,25 @@ function countdown(b: Booking): string | null {
   return `${days} days until your stay!`;
 }
 
+// "Today" is computed in UTC (not local time) to match the server's own
+// Utc::now().date_naive() — these are eligibility mirrors, and drifting a
+// day off the backend's actual answer near midnight would be worse than a
+// plain UTC comparison ever is.
+const todayUtc = () => new Date().toISOString().slice(0, 10);
+
 /** Mirrors the server's checkout-eligibility rule (see checkout::is_checkout_eligible). */
 function isCheckoutEligible(b: Booking): boolean {
-  return b.status === 'approved' && !b.checked_out && b.check_out <= new Date().toISOString().slice(0, 10);
+  return b.status === 'approved' && !b.checked_out && b.check_out <= todayUtc();
 }
 
-const JOURNAL_BADGE: Record<JournalStatus, { label: string; className: string }> = {
-  pending: { label: 'Pending review', className: 'border-amber-300 bg-amber-100 text-amber-900' },
-  approved: { label: 'Published', className: 'border-forest-300 bg-forest-100 text-forest-800' },
-  rejected: { label: 'Not published', className: 'border-sand bg-cream-dark text-muted' },
-};
+/**
+ * Mirrors the server's journal-eligibility rule (see journal::is_journal_eligible):
+ * approved, the stay has started, no entry yet. Checkout is no longer a
+ * prerequisite — a guest can write about a stay any time after it begins.
+ */
+function isJournalEligible(b: Booking): boolean {
+  return b.status === 'approved' && !b.journal_id && b.check_in <= todayUtc();
+}
 
 function BookingCard({ booking, onCancel, cancelling }: {
   booking: Booking;
@@ -65,16 +74,7 @@ function BookingCard({ booking, onCancel, cancelling }: {
               <CheckCircle2 size={12} /> Checked out
             </span>
           )}
-          {booking.journal_status && (
-            <span
-              className={cx(
-                'rounded-full border px-2.5 py-0.5 text-xs font-semibold',
-                JOURNAL_BADGE[booking.journal_status].className,
-              )}
-            >
-              {JOURNAL_BADGE[booking.journal_status].label}
-            </span>
-          )}
+          {booking.journal_status && <JournalStatusBadge status={booking.journal_status} />}
         </div>
       </div>
 
@@ -109,7 +109,7 @@ function BookingCard({ booking, onCancel, cancelling }: {
         </p>
       )}
 
-      {(checkoutEligible || (booking.checked_out && !booking.journal_id) || booking.journal_status === 'pending' || canCancel) && (
+      {(checkoutEligible || isJournalEligible(booking) || booking.journal_status === 'pending' || canCancel) && (
         <div className="mt-4 flex flex-wrap justify-end gap-2">
           {checkoutEligible && (
             <Link to="/checkout">
@@ -118,7 +118,7 @@ function BookingCard({ booking, onCancel, cancelling }: {
               </Button>
             </Link>
           )}
-          {booking.checked_out && !booking.journal_id && (
+          {isJournalEligible(booking) && (
             <Link to={`/journal/new?booking_id=${booking.id}`}>
               <Button size="sm" variant="secondary">
                 <BookOpen size={14} /> Share your story

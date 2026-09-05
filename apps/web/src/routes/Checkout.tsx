@@ -3,9 +3,9 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { BookOpen, CheckCircle2, ClipboardCheck, PartyPopper, TriangleAlert } from 'lucide-react';
-import { Button, Card, EmptyState, Field, PageHeader, Spinner, Textarea, cx } from '../components/ui';
+import { Button, Card, EmptyState, Field, JournalStatusBadge, PageHeader, Spinner, Textarea, cx } from '../components/ui';
 import { api, ApiError } from '../lib/api';
-import { useChecklist, useCheckoutEligible } from '../lib/queries';
+import { useChecklist, useCheckoutEligible, useJournalMine } from '../lib/queries';
 import { formatRange, nightCount, pluralNights } from '../lib/dates';
 import type { CheckoutEligibleBooking, CheckoutResponse } from '../lib/types';
 
@@ -115,23 +115,58 @@ function ChecklistForm({ booking, onDone }: { booking: CheckoutEligibleBooking; 
 }
 
 function JournalPrompt({ bookingId }: { bookingId: string }) {
+  const { data: entries, isLoading } = useJournalMine();
+
+  if (isLoading) {
+    return (
+      <Card className="flex justify-center py-10">
+        <Spinner />
+      </Card>
+    );
+  }
+
+  const existing = entries?.find((e) => e.booking_id === bookingId) ?? null;
+
   return (
     <Card className="text-center">
       <PartyPopper className="mx-auto mb-3 text-forest-600" size={30} />
       <h3 className="font-display text-xl font-bold text-charcoal">Thanks, safe travels!</h3>
-      <p className="mt-2 text-muted">Want to leave a story from your stay?</p>
-      <div className="mt-5 flex flex-wrap justify-center gap-3">
-        <Link to={`/journal/new?booking_id=${bookingId}`}>
-          <Button size="lg">
-            <BookOpen size={16} /> Share Your Story
-          </Button>
-        </Link>
-        <Link to="/my-bookings">
-          <Button size="lg" variant="ghost">
-            Skip
-          </Button>
-        </Link>
-      </div>
+
+      {existing ? (
+        <>
+          <p className="mt-2 text-muted">
+            {existing.status === 'approved'
+              ? 'Thanks again for sharing your story!'
+              : 'Your story is still being reviewed.'}
+          </p>
+          <div className="mt-4 flex justify-center">
+            <JournalStatusBadge status={existing.status} />
+          </div>
+          <div className="mt-5">
+            <Link to="/my-bookings">
+              <Button size="lg" variant="ghost">
+                Back to My Bookings
+              </Button>
+            </Link>
+          </div>
+        </>
+      ) : (
+        <>
+          <p className="mt-2 text-muted">Want to leave a story from your stay?</p>
+          <div className="mt-5 flex flex-wrap justify-center gap-3">
+            <Link to={`/journal/new?booking_id=${bookingId}`}>
+              <Button size="lg">
+                <BookOpen size={16} /> Share Your Story
+              </Button>
+            </Link>
+            <Link to="/my-bookings">
+              <Button size="lg" variant="ghost">
+                Skip
+              </Button>
+            </Link>
+          </div>
+        </>
+      )}
     </Card>
   );
 }

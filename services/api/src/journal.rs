@@ -1,6 +1,6 @@
-//! The camp journal: free-form guest stories tied 1:1 to a completed stay.
-//! Deliberately not a review system — no ratings, no stars, anywhere in
-//! this module or its responses.
+//! The camp journal: free-form guest stories tied 1:1 to a stay. Deliberately
+//! not a review system — no ratings, no stars, anywhere in this module or
+//! its responses.
 
 use crate::{
     ApiResult, AppError, Shared,
@@ -29,20 +29,38 @@ fn first_name(full_name: Option<&str>) -> String {
         .to_string()
 }
 
-/// Whether a booking qualifies to receive a journal entry: it has a
-/// *completed checkout* — not merely a past `check_out` date — and no
-/// entry exists for it yet. Pure mirror of the rule `create()` and
-/// `eligible_bookings()` both enforce, kept here as the tested spec of it.
-pub fn is_journal_eligible(has_completed_checkout: bool, has_existing_entry: bool) -> bool {
-    has_completed_checkout && !has_existing_entry
+/// Whether a booking qualifies to receive a journal entry: approved, the
+/// stay has *started* (`check_in <= today` — mid-stay, departure day, or
+/// well after all count), and no entry exists for it yet. Whether checkout
+/// has happened is irrelevant — a guest can start writing any time after
+/// arrival, not only once they're on their way out. Pure mirror of the rule
+/// `create()` and `eligible_bookings()` both enforce, kept here as the
+/// tested spec of it.
+pub fn is_journal_eligible(
+    status: &str,
+    check_in: NaiveDate,
+    today: NaiveDate,
+    has_existing_entry: bool,
+) -> bool {
+    status == "approved" && check_in <= today && !has_existing_entry
 }
 
-/// `create()` calls this with the checkout-existence check it already had
-/// to make — a past check-out date alone is never enough.
-fn require_checked_out(checked_out: bool) -> ApiResult<()> {
-    if !checked_out {
+/// `create()` calls this once the booking is loaded — approved, but the
+/// stay hasn't started yet.
+fn require_stay_started(check_in: NaiveDate, today: NaiveDate) -> ApiResult<()> {
+    if check_in > today {
         return Err(AppError::BadRequest(
-            "You can share a story once you've completed checkout for this stay.".into(),
+            "You can share a story once your stay has started.".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Only an approved booking was ever actually confirmed to happen.
+fn require_approved(status: &str) -> ApiResult<()> {
+    if status != "approved" {
+        return Err(AppError::BadRequest(
+            "Only approved stays can be journaled about.".into(),
         ));
     }
     Ok(())
@@ -184,8 +202,8 @@ pub struct EligibleBooking {
     pub check_out: NaiveDate,
 }
 
-/// `GET /api/journal/eligible-bookings` — checked-out stays with no
-/// journal entry yet. Drives `/journal/new`.
+/// `GET /api/journal/eligible-bookings` — approved, started stays with no
+/// journal entry yet (see [`is_journal_eligible`]). Drives `/journal/new`.
 pub async fn eligible_bookings(
     State(state): State<Shared>,
     AuthUser(user): AuthUser,
@@ -193,12 +211,12 @@ pub async fn eligible_bookings(
     let rows = sqlx::query_as::<_, EligibleBooking>(
         "SELECT b.id AS booking_id, b.check_in, b.check_out
          FROM bookings b
-         JOIN booking_checkouts bc ON bc.booking_id = b.id
-         WHERE b.user_id = $1
+         WHERE b.user_id = $1 AND b.status = 'approved' AND b.check_in <= $2
            AND NOT EXISTS (SELECT 1 FROM journal_entries je WHERE je.booking_id = b.id)
          ORDER BY b.check_out DESC",
     )
     .bind(user.id)
+    .bind(Utc::now().date_naive())
     .fetch_all(&state.db)
     .await?;
     Ok(Json(rows))
@@ -211,9 +229,9 @@ pub struct CreateEntry {
     pub body: String,
 }
 
-/// `POST /api/journal`. Eligibility deliberately checks for a *completed
-/// checkout*, not merely a past check-out date — a stay that hasn't been
-/// checked out yet can't be journaled about even once departure has passed.
+/// `POST /api/journal`. Eligibility checks the stay has actually *started*
+/// (`check_in <= today`) — whether checkout has happened is irrelevant, a
+/// guest can write about a stay any time after arrival.
 pub async fn create(
     State(state): State<Shared>,
     AuthUser(user): AuthUser,
@@ -228,22 +246,18 @@ pub async fn create(
         return Err(AppError::BadRequest("Story can't be empty.".into()));
     }
 
-    let booking: Option<(NaiveDate, NaiveDate)> =
-        sqlx::query_as("SELECT check_in, check_out FROM bookings WHERE id = $1 AND user_id = $2")
-            .bind(body.booking_id)
-            .bind(user.id)
-            .fetch_optional(&state.db)
-            .await?;
-    let Some((check_in, check_out)) = booking else {
+    let booking: Option<(String, NaiveDate, NaiveDate)> = sqlx::query_as(
+        "SELECT status, check_in, check_out FROM bookings WHERE id = $1 AND user_id = $2",
+    )
+    .bind(body.booking_id)
+    .bind(user.id)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some((status, check_in, check_out)) = booking else {
         return Err(AppError::NotFound("Booking not found.".into()));
     };
-
-    let (checked_out,): (bool,) =
-        sqlx::query_as("SELECT EXISTS(SELECT 1 FROM booking_checkouts WHERE booking_id = $1)")
-            .bind(body.booking_id)
-            .fetch_one(&state.db)
-            .await?;
-    require_checked_out(checked_out)?;
+    require_approved(&status)?;
+    require_stay_started(check_in, Utc::now().date_naive())?;
 
     let (already,): (bool,) =
         sqlx::query_as("SELECT EXISTS(SELECT 1 FROM journal_entries WHERE booking_id = $1)")
@@ -546,31 +560,85 @@ pub async fn reject(
 mod tests {
     use super::*;
 
-    #[test]
-    fn journal_eligibility_requires_a_completed_checkout() {
-        // A past check_out date isn't part of this function's inputs at
-        // all — checked_out here means "has a booking_checkouts row",
-        // not "has departed". That's the point of the rule.
-        assert!(!is_journal_eligible(false, false));
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).unwrap()
     }
 
     #[test]
-    fn journal_eligibility_with_a_completed_checkout_and_no_entry() {
-        assert!(is_journal_eligible(true, false));
+    fn a_stay_that_has_started_is_eligible_even_without_a_completed_checkout() {
+        // The whole point of the rule change: checkout is irrelevant now.
+        let today = date(2026, 9, 6);
+        let started_five_days_ago = date(2026, 9, 1);
+        assert!(is_journal_eligible(
+            "approved",
+            started_five_days_ago,
+            today,
+            false
+        ));
+    }
+
+    #[test]
+    fn check_in_day_itself_counts_as_started() {
+        let today = date(2026, 9, 6);
+        assert!(is_journal_eligible("approved", today, today, false));
+    }
+
+    #[test]
+    fn a_stay_that_has_not_started_yet_is_never_eligible() {
+        let today = date(2026, 9, 6);
+        let starts_next_week = date(2026, 9, 13);
+        assert!(!is_journal_eligible(
+            "approved",
+            starts_next_week,
+            today,
+            false
+        ));
+        // Not eligible regardless of whether an entry already exists either.
+        assert!(!is_journal_eligible(
+            "approved",
+            starts_next_week,
+            today,
+            true
+        ));
+    }
+
+    #[test]
+    fn only_an_approved_booking_is_eligible() {
+        let today = date(2026, 9, 6);
+        for status in ["pending", "denied", "cancelled"] {
+            assert!(
+                !is_journal_eligible(status, today, today, false),
+                "{status} should not be eligible"
+            );
+        }
     }
 
     #[test]
     fn journal_eligibility_excludes_a_stay_that_already_has_an_entry() {
-        assert!(!is_journal_eligible(true, true));
+        let today = date(2026, 9, 6);
+        assert!(!is_journal_eligible("approved", today, today, true));
     }
 
     #[test]
-    fn require_checked_out_blocks_journaling_before_checkout() {
-        assert!(require_checked_out(true).is_ok());
+    fn require_stay_started_blocks_journaling_before_arrival() {
+        let today = date(2026, 9, 6);
+        assert!(require_stay_started(today, today).is_ok());
+        assert!(require_stay_started(date(2026, 9, 1), today).is_ok());
         assert!(matches!(
-            require_checked_out(false),
+            require_stay_started(date(2026, 9, 7), today),
             Err(AppError::BadRequest(_))
         ));
+    }
+
+    #[test]
+    fn require_approved_rejects_anything_else() {
+        assert!(require_approved("approved").is_ok());
+        for status in ["pending", "denied", "cancelled"] {
+            assert!(matches!(
+                require_approved(status),
+                Err(AppError::BadRequest(_))
+            ));
+        }
     }
 
     #[test]
