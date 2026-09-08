@@ -365,9 +365,13 @@ async fn fetch_tides(state: &Shared) -> anyhow::Result<Value> {
 // ─────────────────────────── lunar + solar ───────────────────────────
 
 /// Mean length of one lunation, in days.
-const SYNODIC_MONTH: f64 = 29.530_588_853;
-/// A known new moon: 2000-01-06 18:14 UTC, as a Julian date.
-const KNOWN_NEW_MOON_JD: f64 = 2_451_550.259_722;
+pub(crate) const SYNODIC_MONTH: f64 = 29.530_588_853;
+/// Meeus' *mean* new-moon epoch (Astronomical Algorithms, eq. 49.1, k = 0):
+/// JDE 2451550.09766 ≈ 2000-01-06 14:20 UTC. It has to be the mean instant,
+/// not the apparent one, because we propagate it at the mean synodic rate: the
+/// apparent new moon of that date was ~3.9 h later, and anchoring there put a
+/// constant 3.9 h lag into every phase this function returns.
+const KNOWN_NEW_MOON_JD: f64 = 2_451_550.097_66;
 
 pub(crate) fn to_julian(dt: DateTime<Utc>) -> f64 {
     dt.timestamp() as f64 / 86_400.0 + 2_440_587.5

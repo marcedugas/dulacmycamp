@@ -379,13 +379,41 @@ fn moon_events(date: NaiveDate) -> MoonEvents {
 
 // ─────────────────────────── star rating ───────────────────────────
 
-/// Baseline from the moon phase, per the spec: the syzygies score highest, the
-/// quarters lowest, the shoulders in between.
-fn phase_baseline(phase: &str) -> i32 {
-    match phase {
-        "New Moon" | "Full Moon" => 5,
-        "First Quarter" | "Last Quarter" => 3,
-        _ => 4, // waxing/waning crescent and gibbous
+/// Days a full or new moon's pull is considered "on" — the strong solunar
+/// window is a bracket of a few days around each syzygy, not the instant. Real
+/// solunar tables rate roughly this span at the top.
+const SYZYGY_WINDOW_DAYS: f64 = 2.0;
+/// Same idea around each quarter, for the low score.
+const QUARTER_WINDOW_DAYS: f64 = 2.0;
+
+/// Baseline score (per the spec's phase table: syzygies 5, quarters 3,
+/// shoulders 4) but keyed on the *distance in days* to the nearest new/full or
+/// quarter rather than on the phase label.
+///
+/// The label bands in `weather::phase_name` are only ~±0.6 days wide, so with
+/// one sample per calendar day exactly one day could ever score the syzygy
+/// bonus — and which day that was hinged on sub-day timing the mean-synodic
+/// phase model doesn't resolve (it can be a dozen-plus hours off near the
+/// annual extremes). Widening to a real window makes the rating stable and
+/// matches how a solunar table actually reads.
+fn moon_score(fraction: f64) -> i32 {
+    let cycle = weather::SYNODIC_MONTH;
+    let cycle_days = fraction * cycle;
+    // Distance in days to the nearer of new (0) or full (½ cycle).
+    let to_syzygy = cycle_days
+        .min(cycle - cycle_days)
+        .min((cycle_days - cycle / 2.0).abs());
+    // Distance to the nearer quarter (¼ and ¾ cycle).
+    let to_quarter = (cycle_days - cycle / 4.0)
+        .abs()
+        .min((cycle_days - 3.0 * cycle / 4.0).abs());
+
+    if to_syzygy <= SYZYGY_WINDOW_DAYS {
+        5
+    } else if to_quarter <= QUARTER_WINDOW_DAYS {
+        3
+    } else {
+        4
     }
 }
 
@@ -398,8 +426,8 @@ fn rating_label(stars: i32) -> &'static str {
     }
 }
 
-fn star_rating(phase: &str, pressure_mod: i32, wind_mod: i32) -> i32 {
-    (phase_baseline(phase) + pressure_mod + wind_mod).clamp(1, 5)
+fn star_rating(fraction: f64, pressure_mod: i32, wind_mod: i32) -> i32 {
+    (moon_score(fraction) + pressure_mod + wind_mod).clamp(1, 5)
 }
 
 // ─────────────────────────── HTTP ───────────────────────────
@@ -460,7 +488,8 @@ async fn build_forecast(state: &Shared) -> anyhow::Result<Value> {
         let date = today + Duration::days(offset);
         // Sample the phase at local noon, as the lunar widget does.
         let noon = to_utc(date.and_hms_opt(12, 0, 0).expect("valid noon"));
-        let (phase, emoji) = weather::phase_name(weather::moon_fraction(noon));
+        let fraction = weather::moon_fraction(noon);
+        let (phase, emoji) = weather::phase_name(fraction);
 
         let events = moon_events(date);
 
@@ -477,7 +506,7 @@ async fn build_forecast(state: &Shared) -> anyhow::Result<Value> {
         };
         // The barometric trend is a *now* signal; only today gets it.
         let pressure_mod = if offset == 0 { pressure_mod } else { 0 };
-        let stars = star_rating(phase, pressure_mod, wind_mod);
+        let stars = star_rating(fraction, pressure_mod, wind_mod);
 
         days.push(json!({
             "date": date,
@@ -679,6 +708,53 @@ mod tests {
         assert_local_near(ev.moonset, "17:51", 5);
     }
 
+    fn app_new_moon_near(anchor: DateTime<Utc>) -> DateTime<Utc> {
+        let mut best = anchor;
+        let mut best_dist = 1.0;
+        for min in -(3 * 24 * 60)..=(3 * 24 * 60) {
+            let t = anchor + Duration::minutes(min);
+            let f = weather::moon_fraction(t);
+            let dist = f.min(1.0 - f);
+            if dist < best_dist {
+                best_dist = dist;
+                best = t;
+            }
+        }
+        best
+    }
+
+    #[test]
+    #[ignore = "diagnostic: app mean new moon vs USNO true new moon, all of 2026"]
+    fn print_new_moon_offsets() {
+        // USNO true new moons, 2026, UTC.
+        let usno: &[(i32, u32, u32, u32, u32)] = &[
+            (2026, 1, 18, 19, 52),
+            (2026, 2, 17, 12, 1),
+            (2026, 3, 19, 1, 23),
+            (2026, 4, 17, 11, 52),
+            (2026, 5, 16, 20, 1),
+            (2026, 6, 15, 2, 54),
+            (2026, 7, 14, 9, 43),
+            (2026, 8, 12, 17, 37),
+            (2026, 9, 11, 3, 27),
+            (2026, 10, 10, 15, 50),
+            (2026, 11, 9, 7, 2),
+            (2026, 12, 9, 0, 52),
+        ];
+        for &(y, m, d, hh, mm) in usno {
+            let truth = Utc.with_ymd_and_hms(y, m, d, hh, mm, 0).unwrap();
+            let app = app_new_moon_near(truth);
+            let off_h = (app - truth).num_minutes() as f64 / 60.0;
+            eprintln!(
+                "{y}-{m:02} USNO {} UTC | app {} UTC | app is {off_h:+.1} h | local dates: USNO {}, app {}",
+                truth.format("%d %H:%M"),
+                app.format("%d %H:%M"),
+                truth.with_timezone(&Chicago).format("%m-%d"),
+                app.with_timezone(&Chicago).format("%m-%d"),
+            );
+        }
+    }
+
     #[test]
     #[ignore = "diagnostic: prints deviation from USNO reference"]
     fn print_accuracy() {
@@ -708,27 +784,68 @@ mod tests {
     }
 
     #[test]
-    fn phase_baseline_scores() {
-        assert_eq!(phase_baseline("New Moon"), 5);
-        assert_eq!(phase_baseline("Full Moon"), 5);
-        assert_eq!(phase_baseline("First Quarter"), 3);
-        assert_eq!(phase_baseline("Last Quarter"), 3);
-        assert_eq!(phase_baseline("Waxing Crescent"), 4);
-        assert_eq!(phase_baseline("Waning Gibbous"), 4);
+    fn moon_score_by_distance_to_syzygy() {
+        let at = |days_after_new: f64| (days_after_new / weather::SYNODIC_MONTH).rem_euclid(1.0);
+        // New and full score the top, and hold across a ~2-day shoulder.
+        assert_eq!(moon_score(0.0), 5);
+        assert_eq!(moon_score(0.5), 5);
+        assert_eq!(moon_score(at(1.9)), 5);
+        assert_eq!(moon_score(at(-1.9)), 5);
+        // Just past the syzygy window drops to the shoulder score.
+        assert_eq!(moon_score(at(2.4)), 4);
+        // Mid-crescent / mid-gibbous.
+        assert_eq!(moon_score(at(3.7)), 4);
+        // Quarters and their ~2-day shoulder score the low.
+        assert_eq!(moon_score(0.25), 3);
+        assert_eq!(moon_score(0.75), 3);
+        assert_eq!(moon_score(at(7.383 - 1.9)), 3);
     }
 
     #[test]
     fn star_rating_clamps_and_combines() {
-        // New moon, pressure falling, calm: 5 + 1 + 0 clamps to 5.
-        assert_eq!(star_rating("New Moon", 1, 0), 5);
+        let (new, full, quarter) = (0.0, 0.5, 0.25);
+        // New moon, pressure falling, calm: 5 + 1 clamps to 5.
+        assert_eq!(star_rating(new, 1, 0), 5);
         // Full moon, pressure rising, blowing 20: 5 - 1 - 1 = 3.
-        assert_eq!(star_rating("Full Moon", -1, -1), 3);
+        assert_eq!(star_rating(full, -1, -1), 3);
         // Quarter, rising, windy: 3 - 1 - 1 = 1 (floor).
-        assert_eq!(star_rating("First Quarter", -1, -1), 1);
-        // Quarter, rising glass, windy can't go below 1.
-        assert_eq!(star_rating("Last Quarter", -1, -1), 1);
-        // Crescent baseline, everything neutral.
-        assert_eq!(star_rating("Waxing Crescent", 0, 0), 4);
+        assert_eq!(star_rating(quarter, -1, -1), 1);
+        // Can't go below 1.
+        assert_eq!(star_rating(quarter, -1, -1), 1);
+        // Shoulder baseline, neutral modifiers.
+        assert_eq!(
+            star_rating((3.7_f64 / weather::SYNODIC_MONTH).rem_euclid(1.0), 0, 0),
+            4
+        );
+    }
+
+    /// Regression — the September 2026 new-moon transition, Cocodrie /
+    /// America-Chicago.
+    ///
+    /// USNO puts the new moon at 2026-09-11 03:27 UTC = **2026-09-10 22:27
+    /// local (Thursday)**. The mean-synodic phase model the rating reads runs
+    /// ~13 h late that month (the annual term is near its yearly maximum), and
+    /// the old `phase_name` band was only ~±0.6 days wide — so exactly one
+    /// calendar day could ever score the syzygy bonus, and the lateness put it
+    /// on Friday the 11th. Scoring by distance-to-syzygy over a 2-day window
+    /// gives Thursday a clean 5 and makes the peak the bracket it should be.
+    #[test]
+    fn peak_rating_brackets_the_sept_2026_new_moon() {
+        let score = |day: u32| {
+            let noon = to_utc(date(2026, 9, day).and_hms_opt(12, 0, 0).unwrap());
+            moon_score(weather::moon_fraction(noon))
+        };
+        assert_eq!(
+            score(10),
+            5,
+            "Thursday Sept 10 — the true local new-moon day"
+        );
+        assert_eq!(score(11), 5, "Friday Sept 11");
+        let peak: Vec<u32> = (6..=16).filter(|&d| score(d) == 5).collect();
+        assert!(
+            peak.len() >= 3 && peak.contains(&10) && peak.contains(&11),
+            "expected a multi-day peak including the 10th and 11th, got {peak:?}"
+        );
     }
 
     #[test]

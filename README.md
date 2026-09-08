@@ -136,14 +136,23 @@ south of the camp. That's the water people fish, and wind and pressure there
 differ meaningfully from inland Dulac. `CAMP_LAT`/`CAMP_LON` (the camp itself)
 still drive the "at the camp" sunrise/sunset, where 15 miles changes nothing.
 
-Moon phase comes from the mean synodic month (29.530589 d) against a known new
-moon epoch. Sunrise and sunset use the standard NOAA sunrise equation. The
-fishing forecast needs the moon's actual *position*, not just its phase, so it
-carries a truncated form of Jean Meeus' lunar series (*Astronomical Algorithms*,
-ch. 47) and derives moonrise/set and upper/lower transit from it — the major and
-minor solunar windows. All are unit-tested; the moon events are checked against
-USNO rise/set/transit tables for four dates across 2026 (agreeing to ~1 minute)
-and cross-checked against a published solunar table for Cocodrie.
+Moon phase comes from the mean synodic month (29.530589 d) against Meeus' *mean*
+new-moon epoch (JDE 2451550.09766). It's a mean model: the true new/full moon
+can lead or lag it by up to ~14 h over a year (the annual term), so the phase
+label can name a syzygy a calendar day early or late near the yearly extremes.
+That's fine for the widget and, since the fishing rating scores by *distance to
+the nearest new/full over a 2-day window* rather than by the razor-thin phase
+label, fine there too — a half-day of timing slack can't move a day out of the
+peak bracket. Sunrise and sunset use the standard NOAA sunrise equation.
+
+The fishing forecast needs the moon's actual *position*, not just its phase, so
+it carries a truncated form of Jean Meeus' lunar series (*Astronomical
+Algorithms*, ch. 47) and derives moonrise/set and upper/lower transit from it —
+the major and minor solunar windows. All are unit-tested; the moon events are
+checked against USNO rise/set/transit tables for four dates across 2026
+(agreeing to ~1 minute) and cross-checked against a published solunar table for
+Cocodrie, and the star rating's peak bracket is pinned to the Sept 2026 new-moon
+transition.
 
 ## Deviations from the spec
 
@@ -179,9 +188,20 @@ and cross-checked against a published solunar table for Cocodrie.
 7. **`cargo new` produced a single crate**, not a workspace — the API is small
    enough that splitting it would be ceremony.
 
-8. **Solunar star rating: barometric nudge is today-only.** The pressure trend
+8. **Solunar star rating scores by distance to syzygy, not the phase label.**
+   The spec's baseline table is phase-name-based (new/full 5, quarter 3,
+   shoulder 4). Read literally against `phase_name`, whose "New Moon" band is
+   only ~±0.6 days wide, exactly one calendar day per lunation could score the
+   syzygy bonus — and the mean-synodic model's ~±14 h annual timing error
+   decided *which* day (it landed the Sept 2026 peak on Friday the 11th when the
+   new moon was Thursday the 10th local). The rating now scores by days to the
+   nearest new/full over a 2-day window, which produces the same new/full/quarter
+   values but as the multi-day bracket a real solunar table shows. `phase_name`
+   itself is unchanged — the lunar widget still wants one crisp label.
+
+9. **Solunar star rating: barometric nudge is today-only.** The pressure trend
    is a *now* signal read from live observations; the forecast feed carries no
-   pressure, so days 2–7 are scored on moon phase and forecast wind alone. Also,
+   pressure, so days 2–7 are scored on the moon and forecast wind alone. Also,
    a calendar day sometimes shows one major window rather than two — the second
    transit has simply crossed local midnight into the next day, where it's
    listed. Minor windows are ~1 h per the spec (some hobby tables use 2 h).
