@@ -37,6 +37,16 @@ impl User {
         self.role == "admin"
     }
 
+    /// Whether this user may see who is on a booking — name, email, pets,
+    /// requests, checkout notes. Admins and the camp owner do; ordinary guests
+    /// see an anonymous "Booked" cell. The owner is normally an admin too, but
+    /// the flag is the one that matters: whoever approves stays is reading the
+    /// same details the approval email already puts in their inbox.
+    /// Applied in `crate::bookings::BookingRow::to_view`.
+    pub fn sees_guest_details(&self) -> bool {
+        self.is_admin() || self.is_owner
+    }
+
     /// Best-effort display name for emails and admin tables.
     pub fn display_name(&self) -> String {
         self.full_name

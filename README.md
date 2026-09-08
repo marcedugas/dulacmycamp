@@ -73,8 +73,11 @@ dates* hard-block a booking (409). Capacity works the same way: over
 `CAPACITY_ADULTS`, the request is flagged, never refused.
 
 **Privacy.** The calendar is public but anonymous — approved stays render as
-"Booked" with a head count and no name. The projection happens server-side in
-`BookingRow::to_view`; the client never filters for privacy.
+"Booked" with a head count and no name. Names, emails, pets, requests and
+checkout notes unlock for exactly three viewers: the guest who made the booking,
+any admin, and anyone flagged `is_owner` (`User::sees_guest_details`). The
+projection happens server-side in `BookingRow::to_view`; the client never
+filters for privacy, so a guest's browser is never sent another guest's name.
 
 **Nights, not days.** A stay occupies check-in through the night *before*
 check-out, so the departure day shows free for the next guest.
@@ -94,7 +97,7 @@ See [`.env.example`](.env.example) for the annotated list. The ones that matter:
 | `OWNER_EMAIL` | no | Bootstrap fallback only. Approval mail goes to every user flagged `is_owner` (admin panel → Users); this is used only when none is |
 | `ADMIN_EMAIL` | no | Informational copy |
 | `NOAA_STATION_ID` | no | Default `8762928` (Cocodrie) |
-| `CAPACITY_ADULTS` | no | Default `6` |
+| `CAPACITY_ADULTS` | no | Default `10` |
 | `VITE_API_URL` | prod | Build-time for the web app; changing it needs a redeploy |
 
 ## Deploying to Railway
@@ -161,16 +164,25 @@ covered by unit tests, including a cross-check against the published September
 ## Before go-live
 
 - [x] **Jean's email address** — `jldugas@eatel.net`, flagged `is_owner` by
-      migration `0004`. Approvals are unblocked. (`OWNER_EMAIL` in production
-      still holds the old typo `jeanldugas@eatel.net`; it is now only a
-      fallback, but it should be corrected or cleared.)
-- [ ] **Verify a sending domain in Resend** and set `EMAIL_FROM_ADDRESS`.
-- [ ] **Real photos** — hero background and the four gallery slots in
-      `apps/web/src/routes/Landing.tsx` are placeholders.
-- [ ] **Real house rules and amenities** — the `RULES` and `AMENITIES` arrays in
-      `Landing.tsx` are plausible placeholders, marked `TODO(content)`.
-- [ ] **Confirm capacity** — `CAPACITY_ADULTS` defaults to 6.
-- [ ] Decide whether guests may see each other's names (today: never).
+      migration `0004`. The old typo `jeanldugas@eatel.net` is gone everywhere:
+      `0004` folded any account under it into the real row, dropped its
+      outstanding login codes, and Railway's `OWNER_EMAIL` was corrected
+      2026-09-04. It only survives in that migration's comments, which describe
+      history and should stay. `OWNER_EMAIL` can now be cleared outright — an
+      owner is flagged, so the fallback is never read.
+- [x] **Verify a sending domain in Resend** — `recoresystems.net`, confirmed
+      2026-09-04 by a live send. `EMAIL_FROM_ADDRESS` is `camp@recoresystems.net`.
+- [x] **Real photos** — hero and gallery are live, edited from admin →
+      Site Content (migration `0005`), not hardcoded in `Landing.tsx`.
+- [x] **Real house rules and amenities** — same place; the `RULES` and
+      `AMENITIES` arrays are gone.
+- [x] **Confirm capacity** — 10 adults. `CAPACITY_ADULTS` defaults to `10`;
+      over it, a booking is flagged, never refused.
+- [x] **Guests may not see each other's names.** Identities — name, email, pets,
+      requests, checkout notes — go to the guest who booked, to admins, and to
+      anyone flagged `is_owner`. Everyone else sees an anonymous "Booked" cell
+      with a head count. Enforced server-side in `BookingRow::to_view` via
+      `User::sees_guest_details`; the client never filters for privacy.
 
 ## Rate limiting
 

@@ -66,8 +66,10 @@ struct BookingRow {
 
 /// What a given caller is allowed to see about a booking.
 ///
-/// Public callers get dates and head-count only — the calendar shows that the
-/// camp is taken, never by whom.
+/// Public callers and other guests get dates and head-count only — the calendar
+/// shows that the camp is taken, never by whom. Identities are unlocked for the
+/// booking's own guest, for admins, and for the camp owner
+/// (`User::sees_guest_details`).
 #[derive(Debug, Serialize)]
 pub struct BookingView {
     pub id: Uuid,
@@ -96,7 +98,8 @@ pub struct BookingView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
     /// Whether checkout has been completed for this booking. Same
-    /// visibility as `guest_name` etc. — the booking's owner and admins.
+    /// visibility as `guest_name` etc. — the guest who booked, admins, and the
+    /// camp owner.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checked_out: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -112,7 +115,7 @@ impl BookingRow {
     fn to_view(&self, viewer: Option<&User>) -> BookingView {
         let b = &self.booking;
         let is_mine = viewer.is_some_and(|v| v.id == b.user_id);
-        let full = is_mine || viewer.is_some_and(User::is_admin);
+        let full = is_mine || viewer.is_some_and(User::sees_guest_details);
 
         BookingView {
             id: b.id,

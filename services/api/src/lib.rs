@@ -93,7 +93,7 @@ impl Config {
             noaa_station_id: opt("NOAA_STATION_ID").unwrap_or_else(|| "8762928".into()),
             capacity_adults: opt("CAPACITY_ADULTS")
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(6),
+                .unwrap_or(10),
             bind_addr: opt("BIND_ADDR").unwrap_or_else(|| {
                 let port = opt("PORT").unwrap_or_else(|| "8080".into());
                 format!("0.0.0.0:{port}")

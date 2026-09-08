@@ -264,7 +264,7 @@ export function useCalendarData() {
     bookings: bookings.data ?? [],
     blackouts: blackouts.data ?? [],
     events: events.data ?? [],
-    capacityLimit: config.data?.capacity_adults ?? 6,
+    capacityLimit: config.data?.capacity_adults ?? 10,
     isLoading: bookings.isLoading || blackouts.isLoading || events.isLoading,
     isError: bookings.isError || blackouts.isError || events.isError,
   };

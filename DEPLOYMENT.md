@@ -105,7 +105,7 @@ Set on **dulacmycamp-api**:
 | `FRONTEND_URL` | the web service's public URL |
 | `OWNER_EMAIL` | fallback only — see below |
 | `ADMIN_EMAIL` | `marc@recoresystems.net` |
-| `CAPACITY_ADULTS` | `6` |
+| `CAPACITY_ADULTS` | `10` |
 | `NOAA_STATION_ID` | `8762928` (Cocodrie) |
 | `LOG_LEVEL` | `info,dulacmycamp_api=debug` |
 

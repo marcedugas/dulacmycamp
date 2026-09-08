@@ -231,7 +231,7 @@ export default function Landing() {
         title="About the camp"
         subtitle={
           aboutText ||
-          `Family and friends only. The camp sleeps ${config?.capacity_adults ?? 6} adults comfortably — more with kids on the bunks.`
+          `Family and friends only. The camp sleeps ${config?.capacity_adults ?? 10} adults comfortably — more with kids on the bunks.`
         }
         id="about"
       >
