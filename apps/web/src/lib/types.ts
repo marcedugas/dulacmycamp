@@ -308,6 +308,12 @@ export interface WeatherCurrent {
   wind_direction_deg?: number | null;
   wind_direction?: string | null;
   humidity: number | null;
+  /** Barometric pressure, millibars. Absent on the forecast fallback. */
+  pressure_mb?: number | null;
+  /** Direction of the barometric change over the last ~6 h. */
+  pressure_trend?: 'falling' | 'rising' | 'steady';
+  /** Signed change in millibars over that window. */
+  pressure_change_mb?: number | null;
   observed_at: string | null;
   source: 'observation' | 'forecast';
 }

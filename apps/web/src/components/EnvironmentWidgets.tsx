@@ -101,6 +101,14 @@ export function WeatherWidget() {
               : (c?.wind_text ?? 'Wind —')}
             {c?.humidity != null && ` · ${Math.round(c.humidity)}% humidity`}
           </p>
+          {c?.pressure_mb != null && (
+            <p className="text-muted">
+              {c.pressure_mb.toFixed(0)} mb
+              {c.pressure_trend && c.pressure_trend !== 'steady' && (
+                <span className="ml-1">{c.pressure_trend === 'falling' ? '↓ falling' : '↑ rising'}</span>
+              )}
+            </p>
+          )}
         </div>
       </div>
 
