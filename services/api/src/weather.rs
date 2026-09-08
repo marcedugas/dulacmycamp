@@ -309,23 +309,24 @@ pub async fn tides(State(state): State<Shared>) -> ApiResult<Json<Value>> {
 
 async fn fetch_tides(state: &Shared) -> anyhow::Result<Value> {
     let station = &state.cfg.noaa_station_id;
-    let begin = Utc::now().with_timezone(&Chicago).format("%Y%m%d");
+    let now_local = Utc::now().with_timezone(&Chicago);
+    let begin = now_local.format("%Y%m%d");
 
-    // `interval=hilo` returns only the turning points, which is all the widget
-    // shows. `range=168` is seven days in hours.
-    let url = format!(
+    // `interval=hilo` returns only the turning points — the list the widget has
+    // always shown. `range=168` is seven days in hours.
+    let hilo_url = format!(
         "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter\
          ?product=predictions&application=dulacmycamp&begin_date={begin}&range=168\
          &datum=MLLW&station={station}&time_zone=lst_ldt&units=english\
          &interval=hilo&format=json"
     );
 
-    let data = fetch_json(state, &url).await?;
+    let data = fetch_json(state, &hilo_url).await?;
     if let Some(err) = data["error"]["message"].as_str() {
         anyhow::bail!("NOAA tides: {err}");
     }
 
-    let predictions: Vec<Value> = data["predictions"]
+    let next_tides: Vec<Value> = data["predictions"]
         .as_array()
         .cloned()
         .unwrap_or_default()
@@ -344,6 +345,22 @@ async fn fetch_tides(state: &Shared) -> anyhow::Result<Value> {
         })
         .collect();
 
+    // A continuous hourly curve so the widget can draw the tide's shape, not
+    // just its turning points. Best-effort on its own request: if only this
+    // call fails the widget falls back to the list, so a NOAA hiccup here
+    // doesn't cost the whole feed. Window: the last ~6 h through the next ~42 h.
+    let curve_begin = (now_local - Duration::hours(6))
+        .format("%Y%m%d %H:%M")
+        .to_string()
+        .replace(' ', "%20");
+    let curve = match fetch_tide_curve(state, station, &curve_begin).await {
+        Ok(points) => points,
+        Err(e) => {
+            tracing::warn!(error = ?e, "NOAA tide curve fetch failed; widget shows the list only");
+            Vec::new()
+        }
+    };
+
     // Station metadata gives us a real name rather than a bare id in the UI.
     let station_name = fetch_json(
         state,
@@ -357,9 +374,58 @@ async fn fetch_tides(state: &Shared) -> anyhow::Result<Value> {
         "station_id": station,
         "station_name": station_name,
         "timezone": "America/Chicago",
-        "predictions": predictions,
+        "next_tides": next_tides,
+        "curve": curve,
         "updated_at": Utc::now(),
     }))
+}
+
+/// URL for a continuous hourly prediction window — `interval=h`, `range=48`
+/// hours from `begin` (which the caller sets to ~6 h ago). Split out so the
+/// query shape is unit-testable without a network call.
+fn tide_curve_url(station: &str, begin: &str) -> String {
+    format!(
+        "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter\
+         ?product=predictions&application=dulacmycamp&begin_date={begin}&range=48\
+         &datum=MLLW&station={station}&time_zone=lst_ldt&units=english\
+         &interval=h&format=json"
+    )
+}
+
+async fn fetch_tide_curve(
+    state: &Shared,
+    station: &str,
+    begin: &str,
+) -> anyhow::Result<Vec<Value>> {
+    let data = fetch_json(state, &tide_curve_url(station, begin)).await?;
+    parse_tide_curve(&data)
+}
+
+/// Pulls the hourly `{ time, height_ft }` points out of a datagetter response.
+/// Errors — rather than returning an empty `Vec` — on a NOAA error message or a
+/// response with too few usable points, so the caller falls back to the hi/lo
+/// list instead of drawing a blank graph.
+fn parse_tide_curve(data: &Value) -> anyhow::Result<Vec<Value>> {
+    if let Some(err) = data["error"]["message"].as_str() {
+        anyhow::bail!("NOAA tide curve: {err}");
+    }
+    let points: Vec<Value> = data["predictions"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|p| {
+            let time = p["t"].as_str()?;
+            let height_ft = p["v"].as_str().and_then(|v| v.parse::<f64>().ok())?;
+            // Same local "YYYY-MM-DD HH:MM" string as `next_tides`, so the
+            // frontend puts both on one axis with no timezone arithmetic.
+            Some(json!({ "time": time, "height_ft": height_ft }))
+        })
+        .collect();
+    if points.len() < 2 {
+        anyhow::bail!("NOAA tide curve: only {} usable point(s)", points.len());
+    }
+    Ok(points)
 }
 
 // ─────────────────────────── lunar + solar ───────────────────────────
@@ -614,5 +680,55 @@ mod tests {
         assert!((c_to_f(0.0) - 32.0).abs() < 1e-9);
         assert!((c_to_f(100.0) - 212.0).abs() < 1e-9);
         assert!((kmh_to_mph(100.0) - 62.137).abs() < 0.01);
+    }
+
+    // ── tide curve ──
+
+    #[test]
+    fn tide_curve_url_requests_an_hourly_48h_window() {
+        let url = tide_curve_url("8762928", "20260908%2006:00");
+        assert!(url.contains("interval=h"), "{url}");
+        assert!(url.contains("range=48"), "{url}");
+        assert!(url.contains("begin_date=20260908%2006:00"), "{url}");
+        assert!(url.contains("station=8762928"), "{url}");
+        assert!(url.contains("time_zone=lst_ldt"), "{url}");
+    }
+
+    #[test]
+    fn tide_curve_keeps_the_full_hourly_window() {
+        let start = NaiveDate::from_ymd_opt(2026, 9, 8)
+            .unwrap()
+            .and_hms_opt(6, 0, 0)
+            .unwrap();
+        let preds: Vec<Value> = (0i32..=48)
+            .map(|h| {
+                json!({
+                    "t": (start + Duration::hours(i64::from(h)))
+                        .format("%Y-%m-%d %H:%M")
+                        .to_string(),
+                    "v": format!("{:.3}", 1.0 + (f64::from(h) * 0.5).sin()),
+                })
+            })
+            .collect();
+
+        let curve = parse_tide_curve(&json!({ "predictions": preds })).unwrap();
+        assert_eq!(curve.len(), 49, "one point per hour across the window");
+        assert_eq!(curve.first().unwrap()["time"], "2026-09-08 06:00");
+        assert_eq!(curve.last().unwrap()["time"], "2026-09-10 06:00");
+        assert!(curve[1]["height_ft"].as_f64().is_some());
+    }
+
+    #[test]
+    fn tide_curve_errors_rather_than_returning_an_empty_array() {
+        // A NOAA error message, an empty array, a missing key, and a row with no
+        // usable height all have to surface as `Err` so `fetch_tides` falls
+        // back to the hi/lo list instead of handing the widget a blank graph.
+        assert!(parse_tide_curve(&json!({ "error": { "message": "No data found" } })).is_err());
+        assert!(parse_tide_curve(&json!({ "predictions": [] })).is_err());
+        assert!(parse_tide_curve(&json!({})).is_err());
+        assert!(
+            parse_tide_curve(&json!({ "predictions": [{ "t": "2026-09-08 06:00" }] })).is_err(),
+            "a single unusable row is not a curve"
+        );
     }
 }

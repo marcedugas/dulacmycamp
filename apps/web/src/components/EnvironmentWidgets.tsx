@@ -2,7 +2,15 @@ import { useQuery } from '@tanstack/react-query';
 import { format } from 'date-fns';
 import { Droplets, Fish, Moon, Star, Sunrise, Sunset, Waves, Wind } from 'lucide-react';
 import { api } from '../lib/api';
-import type { FishingForecast, Lunar, SolunarPeriod, Tides, Weather } from '../lib/types';
+import type {
+  FishingForecast,
+  Lunar,
+  SolunarPeriod,
+  TideCurvePoint,
+  TidePrediction,
+  Tides,
+  Weather,
+} from '../lib/types';
 import { parseDay } from '../lib/dates';
 import { Card, Spinner, cx } from './ui';
 
@@ -144,6 +152,124 @@ export function WeatherWidget() {
 
 // ─────────────────────────── tides ───────────────────────────
 
+/** Parses the station-local "YYYY-MM-DD HH:MM" to an epoch for axis maths.
+ * Every series here (curve, hi/lo marks, "now") goes through this, so the
+ * graph is internally consistent regardless of the viewer's timezone. */
+function tideEpoch(s: string): number {
+  return new Date(s.replace(' ', 'T')).getTime();
+}
+
+const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+
+/**
+ * Hand-drawn SVG of the tide's rise and fall — an area + line through the
+ * hourly points, the hi/lo turning points dotted and labelled, and a dashed
+ * "now" marker. Vector, no charting library, palette-matched.
+ */
+function TideCurve({
+  curve,
+  marks,
+  timezone,
+}: {
+  curve: TideCurvePoint[];
+  marks: TidePrediction[];
+  timezone: string;
+}) {
+  const W = 340;
+  const H = 132;
+  const pad = { top: 18, right: 8, bottom: 16, left: 8 };
+
+  const pts = curve.map((p) => ({ t: tideEpoch(p.time), h: p.height_ft }));
+  const minT = pts[0].t;
+  const maxT = pts[pts.length - 1].t;
+  const spanT = maxT - minT || 1;
+  const hs = pts.map((p) => p.h);
+  const minH = Math.min(...hs);
+  const maxH = Math.max(...hs);
+  const spanH = maxH - minH || 1;
+
+  const x = (t: number) => pad.left + (clamp(t, minT, maxT) - minT) / spanT * (W - pad.left - pad.right);
+  const y = (h: number) => pad.top + (1 - (h - minH) / spanH) * (H - pad.top - pad.bottom);
+
+  const line = pts.map((p, i) => `${i ? 'L' : 'M'}${x(p.t).toFixed(1)},${y(p.h).toFixed(1)}`).join(' ');
+  const base = H - pad.bottom;
+  const area = `${line} L${x(maxT).toFixed(1)},${base} L${x(minT).toFixed(1)},${base} Z`;
+
+  const nowT = tideEpoch(nowAtZone(timezone));
+  const inFrame = marks.filter(
+    (m) => m.height_ft != null && tideEpoch(m.time) >= minT && tideEpoch(m.time) <= maxT,
+  );
+
+  return (
+    <svg
+      viewBox={`0 0 ${W} ${H}`}
+      className="w-full"
+      role="img"
+      aria-label="Tide height over the next two days"
+    >
+      <path d={area} fill="var(--color-bayou-100)" />
+      <line x1={pad.left} y1={base} x2={W - pad.right} y2={base} stroke="var(--color-sand)" />
+      <path
+        d={line}
+        fill="none"
+        stroke="var(--color-bayou-500)"
+        strokeWidth={1.75}
+        strokeLinejoin="round"
+        strokeLinecap="round"
+      />
+
+      {nowT >= minT && nowT <= maxT && (
+        <g>
+          <line
+            x1={x(nowT)}
+            y1={pad.top - 6}
+            x2={x(nowT)}
+            y2={base}
+            stroke="var(--color-clay)"
+            strokeWidth={1}
+            strokeDasharray="3 2"
+          />
+          <text
+            x={clamp(x(nowT), 12, W - 12)}
+            y={pad.top - 9}
+            textAnchor="middle"
+            fontSize={8}
+            fontWeight={700}
+            fill="var(--color-clay)"
+          >
+            now
+          </text>
+        </g>
+      )}
+
+      {inFrame.map((m) => {
+        const cx = x(tideEpoch(m.time));
+        const cy = y(m.height_ft as number);
+        const high = m.kind === 'high';
+        return (
+          <g key={m.time}>
+            <circle cx={cx} cy={cy} r={2.4} fill="var(--color-forest-600)" />
+            <text
+              x={clamp(cx, 22, W - 22)}
+              y={high ? cy - 6 : cy + 12}
+              textAnchor="middle"
+              fontSize={8.5}
+              fontWeight={600}
+              fill="var(--color-charcoal)"
+            >
+              {(m.height_ft as number).toFixed(1)} ft
+              <tspan fill="var(--color-muted)" fontWeight={400}>
+                {' '}
+                {format(parseStationTime(m.time), 'h:mma').toLowerCase()}
+              </tspan>
+            </text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
 export function TideWidget({ count = 4 }: { count?: number }) {
   const { data, isLoading, isError } = useQuery({
     queryKey: ['tides'],
@@ -154,7 +280,7 @@ export function TideWidget({ count = 4 }: { count?: number }) {
   const upcoming = (() => {
     if (!data) return [];
     const now = nowAtZone(data.timezone);
-    return data.predictions.filter((p) => p.time >= now).slice(0, count);
+    return data.next_tides.filter((p) => p.time >= now).slice(0, count);
   })();
 
   return (
@@ -167,6 +293,13 @@ export function TideWidget({ count = 4 }: { count?: number }) {
       <p className="-mt-1 mb-3 text-xs text-muted">
         {data?.station_name ?? 'NOAA station'} · #{data?.station_id}
       </p>
+
+      {data && data.curve.length >= 2 && (
+        <div className="mb-4 rounded-lg border border-sand bg-cream-dark/40 p-2">
+          <TideCurve curve={data.curve} marks={data.next_tides} timezone={data.timezone} />
+        </div>
+      )}
+
       {upcoming.length === 0 ? (
         <p className="text-sm text-muted">No upcoming predictions.</p>
       ) : (

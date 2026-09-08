@@ -345,11 +345,21 @@ export interface TidePrediction {
   kind: 'high' | 'low' | 'unknown';
 }
 
+/** One hourly point on the continuous tide curve. Same local-time format as {@link TidePrediction}. */
+export interface TideCurvePoint {
+  time: string;
+  height_ft: number;
+}
+
 export interface Tides {
   station_id: string;
   station_name: string | null;
   timezone: string;
-  predictions: TidePrediction[];
+  /** The hi/lo turning points — the plain-text list. */
+  next_tides: TidePrediction[];
+  /** Hourly heights across ~48 h (last ~6 h → next ~42 h). Empty when NOAA's
+   * continuous feed failed but hi/lo succeeded — render the list only. */
+  curve: TideCurvePoint[];
   updated_at: string;
 }
 

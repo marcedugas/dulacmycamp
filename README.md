@@ -120,7 +120,7 @@ Then close the loop: set the API's `API_BASE_URL` to its own public URL and
 | Feed | Source | Cache |
 |---|---|---|
 | Weather | `api.weather.gov` — `/points/{lat},{lon}` → forecast grid + nearest station's recent observations | 30 min |
-| Tides | NOAA CO-OPS `datagetter`, `interval=hilo`, 7 days at station `8762928` | 1 h |
+| Tides | NOAA CO-OPS `datagetter` — `interval=hilo` (7-day turning points) + `interval=h` (hourly curve, last ~6 h → next ~42 h) at station `8762928` | 1 h |
 | Moon & sun | Computed locally — no upstream | n/a |
 | Fishing forecast | Computed locally (solunar); star rating nudged by the weather feed | 1 h |
 
@@ -205,6 +205,13 @@ transition.
    a calendar day sometimes shows one major window rather than two — the second
    transit has simply crossed local midnight into the next day, where it's
    listed. Minor windows are ~1 h per the spec (some hobby tables use 2 h).
+
+10. **Tide `curve` timestamps are the station's local wall-clock string**
+    (`"YYYY-MM-DD HH:MM"`), not the UTC `…Z` the fishing-forecast spec sketched.
+    The hi/lo `next_tides` list has always used that format and stays unchanged;
+    keeping the curve on the same string lets the widget put both series — and
+    the "now" marker — on one axis with zero timezone arithmetic, and it renders
+    the same clock for a viewer in any timezone.
 
 ## Before go-live
 
