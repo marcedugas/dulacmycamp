@@ -119,19 +119,31 @@ Then close the loop: set the API's `API_BASE_URL` to its own public URL and
 
 | Feed | Source | Cache |
 |---|---|---|
-| Weather | `api.weather.gov` — `/points/{lat},{lon}` → forecast grid + nearest station's latest observation | 30 min |
+| Weather | `api.weather.gov` — `/points/{lat},{lon}` → forecast grid + nearest station's recent observations | 30 min |
 | Tides | NOAA CO-OPS `datagetter`, `interval=hilo`, 7 days at station `8762928` | 1 h |
 | Moon & sun | Computed locally — no upstream | n/a |
+| Fishing forecast | Computed locally (solunar); star rating nudged by the weather feed | 1 h |
 
 `api.weather.gov` rejects requests without a `User-Agent`; ours identifies the
-app. Both feeds are cached in-process because they change far more slowly than
-the landing page is loaded.
+app. Both proxied feeds are cached in-process because they change far more
+slowly than the landing page is loaded. The observation call pulls a short
+window (`?limit=12`), not just the latest reading, so the fishing forecast can
+read a barometric *trend* off it; the window is cached once and shared.
+
+**Coordinates.** The weather and fishing feeds use `FISHING_LAT`/`FISHING_LON`
+(≈ 29.245, −90.662) — the Cocodrie estuary, matching the tide station, ~15 miles
+south of the camp. That's the water people fish, and wind and pressure there
+differ meaningfully from inland Dulac. `CAMP_LAT`/`CAMP_LON` (the camp itself)
+still drive the "at the camp" sunrise/sunset, where 15 miles changes nothing.
 
 Moon phase comes from the mean synodic month (29.530589 d) against a known new
-moon epoch. Sunrise and sunset use the standard NOAA sunrise equation — accurate
-to well under a minute at this latitude, which is all a widget needs. Both are
-covered by unit tests, including a cross-check against the published September
-2026 full moon.
+moon epoch. Sunrise and sunset use the standard NOAA sunrise equation. The
+fishing forecast needs the moon's actual *position*, not just its phase, so it
+carries a truncated form of Jean Meeus' lunar series (*Astronomical Algorithms*,
+ch. 47) and derives moonrise/set and upper/lower transit from it — the major and
+minor solunar windows. All are unit-tested; the moon events are checked against
+USNO rise/set/transit tables for four dates across 2026 (agreeing to ~1 minute)
+and cross-checked against a published solunar table for Cocodrie.
 
 ## Deviations from the spec
 
@@ -142,24 +154,37 @@ covered by unit tests, including a cross-check against the published September
    the number. Override with `NOAA_STATION_ID`; the widget always shows the
    station's real name, so a wrong station is visible rather than silent.
 
-2. **No `APPROVE_TOKEN_SECRET`.** Approve/deny tokens are 256-bit random values
+2. **Weather feed pointed at the estuary, not the camp.** It was using the
+   camp's own coordinates (29.3802, −90.7148); it now uses the Cocodrie
+   estuary's (`FISHING_LAT`/`FISHING_LON`), matching the tide station. Same
+   reasoning as deviation 1 — the label (water people fish) over the letter
+   (the camp's dot on the map). Sun/moon times still use the camp.
+
+3. **No `APPROVE_TOKEN_SECRET`.** Approve/deny tokens are 256-bit random values
    stored single-use in the database, which is strictly stronger than a signed
    token: it is revocable, can't be replayed, and there is no secret to leak or
    rotate. The variable is therefore absent rather than unused-but-present.
 
-3. **PDF export is drawn, not screenshotted.** Tailwind v4 emits `oklch()`
+4. **PDF export is drawn, not screenshotted.** Tailwind v4 emits `oklch()`
    colours, which html2canvas cannot parse — it would have thrown at runtime.
    `src/lib/pdf.ts` draws the grid with jsPDF primitives instead: sharper,
    ~10× smaller, and vector. The Year view exports as 12 pages.
 
-4. **Migrations live at `services/api/migrations/`** (SQLx's default), not
+5. **Migrations live at `services/api/migrations/`** (SQLx's default), not
    `src/migrations/` as the file tree in the spec showed.
 
-5. **Added `GET /api/config`** so the adult capacity isn't hardcoded twice and
+6. **Added `GET /api/config`** so the adult capacity isn't hardcoded twice and
    allowed to drift between API and UI.
 
-6. **`cargo new` produced a single crate**, not a workspace — the API is small
+7. **`cargo new` produced a single crate**, not a workspace — the API is small
    enough that splitting it would be ceremony.
+
+8. **Solunar star rating: barometric nudge is today-only.** The pressure trend
+   is a *now* signal read from live observations; the forecast feed carries no
+   pressure, so days 2–7 are scored on moon phase and forecast wind alone. Also,
+   a calendar day sometimes shows one major window rather than two — the second
+   transit has simply crossed local midnight into the next day, where it's
+   listed. Minor windows are ~1 h per the spec (some hobby tables use 2 h).
 
 ## Before go-live
 

@@ -10,7 +10,12 @@ import {
   XCircle,
 } from 'lucide-react';
 import { buildIndex } from '../components/CampCalendar';
-import { LunarWidget, TideWidget, WeatherWidget } from '../components/EnvironmentWidgets';
+import {
+  FishingWidget,
+  LunarWidget,
+  TideWidget,
+  WeatherWidget,
+} from '../components/EnvironmentWidgets';
 import { Button, Card, EmptyState, Section, Spinner, cx } from '../components/ui';
 import { assetUrl } from '../lib/api';
 import { amenityIcon } from '../lib/icons';
@@ -323,13 +328,17 @@ export default function Landing() {
       </Section>
 
       <div className="bg-cream-dark/50">
-        <Section title="On the water" subtitle="Live conditions for Dulac, straight from NOAA.">
+        <Section
+          title="On the water"
+          subtitle="Live conditions for the Cocodrie estuary — the water you'll actually fish — straight from NOAA, plus a solunar bite forecast."
+        >
           <div className="space-y-4">
             <WeatherWidget />
             <div className="grid gap-4 md:grid-cols-2">
               <TideWidget />
               <LunarWidget />
             </div>
+            <FishingWidget />
           </div>
         </Section>
       </div>

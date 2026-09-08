@@ -1,8 +1,8 @@
 import { useQuery } from '@tanstack/react-query';
 import { format } from 'date-fns';
-import { Droplets, Moon, Sunrise, Sunset, Waves, Wind } from 'lucide-react';
+import { Droplets, Fish, Moon, Star, Sunrise, Sunset, Waves, Wind } from 'lucide-react';
 import { api } from '../lib/api';
-import type { Lunar, Tides, Weather } from '../lib/types';
+import type { FishingForecast, Lunar, SolunarPeriod, Tides, Weather } from '../lib/types';
 import { parseDay } from '../lib/dates';
 import { Card, Spinner, cx } from './ui';
 
@@ -79,11 +79,15 @@ export function WeatherWidget() {
 
   return (
     <WidgetShell
-      title="Weather at the camp"
+      title="Weather on the water"
       icon={<Wind size={15} />}
       loading={isLoading}
       error={isError || !data}
     >
+      <p className="-mt-1 mb-3 text-xs text-muted">
+        {data?.location ?? 'Cocodrie estuary'} — the water, not the camp
+      </p>
+
       <div className="flex items-baseline gap-3">
         <span className="font-display text-5xl font-bold text-forest-600">
           {c?.temp_f != null ? Math.round(c.temp_f) : '—'}
@@ -238,6 +242,110 @@ export function LunarWidget() {
           </dd>
         </div>
       </dl>
+    </WidgetShell>
+  );
+}
+
+// ─────────────────────────── fishing forecast ───────────────────────────
+
+/** "14:30" (local, from the API) → "2:30 PM". */
+function fmtPeriodTime(hm: string): string {
+  const [h, m] = hm.split(':').map(Number);
+  const d = new Date();
+  d.setHours(h, m, 0, 0);
+  return format(d, 'h:mm a');
+}
+
+function StarRating({ stars }: { stars: number }) {
+  return (
+    <span className="flex gap-0.5" aria-label={`${stars} out of 5 stars`}>
+      {[1, 2, 3, 4, 5].map((n) => (
+        <Star
+          key={n}
+          size={18}
+          className={n <= stars ? 'fill-current text-wood-500' : 'text-sand'}
+        />
+      ))}
+    </span>
+  );
+}
+
+function PeriodColumn({ label, periods }: { label: string; periods: SolunarPeriod[] }) {
+  return (
+    <div>
+      <p className="text-[11px] font-bold uppercase tracking-wide text-muted">{label}</p>
+      {periods.length === 0 ? (
+        <p className="text-muted">—</p>
+      ) : (
+        <ul className="mt-1 space-y-0.5">
+          {periods.map((p) => (
+            <li key={p.start} className="font-semibold tabular-nums text-charcoal">
+              {fmtPeriodTime(p.start)} – {fmtPeriodTime(p.end)}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+export function FishingWidget() {
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ['fishing-forecast'],
+    queryFn: () => api<FishingForecast>('/fishing-forecast?days=7', { anonymous: true }),
+    staleTime: 60 * 60_000,
+  });
+
+  const today = data?.days[0];
+
+  return (
+    <WidgetShell
+      title="Fishing forecast"
+      icon={<Fish size={15} />}
+      loading={isLoading}
+      error={isError || !data || !today}
+    >
+      {today && (
+        <>
+          <div className="flex items-center gap-3">
+            <StarRating stars={today.stars} />
+            <span className="font-display text-lg font-bold text-charcoal">
+              {today.rating_label}
+            </span>
+            <span className="ml-auto text-2xl leading-none" aria-hidden>
+              {today.moon_emoji}
+            </span>
+          </div>
+
+          <div className="mt-4 grid grid-cols-2 gap-3 border-t border-sand pt-3 text-sm">
+            <PeriodColumn label="Major periods" periods={today.major_periods} />
+            <PeriodColumn label="Minor periods" periods={today.minor_periods} />
+          </div>
+
+          <div className="-mx-1 mt-4 flex gap-2 overflow-x-auto px-1 pb-1">
+            {data?.days.map((d) => (
+              <div
+                key={d.date}
+                title={`${d.rating_label} · ${d.moon_phase}`}
+                className="min-w-[64px] flex-1 rounded-lg border border-sand bg-cream-dark/50 p-2 text-center"
+              >
+                <p className="text-[11px] font-bold uppercase tracking-wide text-muted">
+                  {format(parseDay(d.date), 'EEE')}
+                </p>
+                <p className="text-[10px] text-muted">{format(parseDay(d.date), 'M/d')}</p>
+                <p className="mt-1 text-sm font-bold tracking-tight text-wood-600" aria-hidden>
+                  {'★'.repeat(d.stars)}
+                  <span className="text-sand">{'★'.repeat(5 - d.stars)}</span>
+                </p>
+              </div>
+            ))}
+          </div>
+
+          <p className="mt-3 text-xs text-muted">
+            {data?.disclaimer ?? 'Based on solunar theory — a fun guide, not a guarantee!'}
+          </p>
+        </>
+      )}
     </WidgetShell>
   );
 }

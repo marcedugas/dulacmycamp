@@ -366,3 +366,30 @@ export interface Lunar {
   next_full_moon: { at: string; date: string; days_away: number };
   days: LunarDay[];
 }
+
+/** A solunar bite window, local "HH:MM" (may cross midnight, so end < start). */
+export interface SolunarPeriod {
+  start: string;
+  end: string;
+}
+
+export interface FishingDay {
+  date: string;
+  /** 1–5. Moon phase baseline, nudged by today's barometric trend and wind. */
+  stars: number;
+  rating_label: 'Poor' | 'Fair' | 'Good' | 'Excellent';
+  moon_phase: string;
+  moon_emoji: string;
+  /** ~2 h, bracketing the moon's upper and lower transit. */
+  major_periods: SolunarPeriod[];
+  /** ~1 h, bracketing moonrise and moonset. */
+  minor_periods: SolunarPeriod[];
+}
+
+export interface FishingForecast {
+  location: string;
+  timezone: string;
+  generated_at: string;
+  disclaimer: string;
+  days: FishingDay[];
+}

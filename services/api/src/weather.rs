@@ -5,19 +5,27 @@
 //! callers not to poll. Lunar and solar values are computed locally; they are
 //! closed-form astronomy and need no upstream at all.
 
-use crate::{ApiResult, AppError, CAMP_LAT, CAMP_LON, CacheEntry, Shared};
+use crate::{
+    ApiResult, AppError, CAMP_LAT, CAMP_LON, CacheEntry, FISHING_LAT, FISHING_LON, Shared,
+};
 use axum::{Json, extract::State};
 use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
 use chrono_tz::America::Chicago;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::time::{Duration as StdDuration, Instant};
 
 const WEATHER_TTL: StdDuration = StdDuration::from_secs(30 * 60);
 const TIDES_TTL: StdDuration = StdDuration::from_secs(60 * 60);
+/// Observations move a little faster than the forecast; refresh on the same
+/// cadence as the weather card that mostly drives them.
+const OBS_TTL: StdDuration = StdDuration::from_secs(30 * 60);
 
 /// Returns the cached value when it is still fresh.
-async fn cached(slot: &tokio::sync::RwLock<Option<CacheEntry>>, ttl: StdDuration) -> Option<Value> {
+pub(crate) async fn cached(
+    slot: &tokio::sync::RwLock<Option<CacheEntry>>,
+    ttl: StdDuration,
+) -> Option<Value> {
     let guard = slot.read().await;
     guard
         .as_ref()
@@ -25,14 +33,14 @@ async fn cached(slot: &tokio::sync::RwLock<Option<CacheEntry>>, ttl: StdDuration
         .map(|e| e.value.clone())
 }
 
-async fn store(slot: &tokio::sync::RwLock<Option<CacheEntry>>, value: Value) {
+pub(crate) async fn store(slot: &tokio::sync::RwLock<Option<CacheEntry>>, value: Value) {
     *slot.write().await = Some(CacheEntry {
         fetched_at: Instant::now(),
         value,
     });
 }
 
-async fn fetch_json(state: &Shared, url: &str) -> anyhow::Result<Value> {
+pub(crate) async fn fetch_json(state: &Shared, url: &str) -> anyhow::Result<Value> {
     let resp = state.http.get(url).send().await?;
     if !resp.status().is_success() {
         anyhow::bail!("{url} returned {}", resp.status());
@@ -44,7 +52,7 @@ fn c_to_f(c: f64) -> f64 {
     c * 9.0 / 5.0 + 32.0
 }
 
-fn kmh_to_mph(k: f64) -> f64 {
+pub(crate) fn kmh_to_mph(k: f64) -> f64 {
     k * 0.621_371
 }
 
@@ -73,9 +81,11 @@ pub async fn weather(State(state): State<Shared>) -> ApiResult<Json<Value>> {
 }
 
 async fn fetch_weather(state: &Shared) -> anyhow::Result<Value> {
+    // The estuary grid, not the camp's — wind and pressure on the open water
+    // are what a fisherman is reading the card for.
     let points = fetch_json(
         state,
-        &format!("https://api.weather.gov/points/{CAMP_LAT},{CAMP_LON}"),
+        &format!("https://api.weather.gov/points/{FISHING_LAT},{FISHING_LON}"),
     )
     .await?;
 
@@ -83,9 +93,6 @@ async fn fetch_weather(state: &Shared) -> anyhow::Result<Value> {
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("no forecast url in points response"))?
         .to_string();
-    let stations_url = points["properties"]["observationStations"]
-        .as_str()
-        .map(str::to_string);
 
     let forecast = fetch_json(state, &forecast_url).await?;
     let periods = forecast["properties"]["periods"]
@@ -122,7 +129,7 @@ async fn fetch_weather(state: &Shared) -> anyhow::Result<Value> {
         }
     }
 
-    let current = match current_conditions(state, stations_url.as_deref()).await {
+    let current = match current_conditions(state).await {
         Ok(mut c) => {
             if c["conditions"].is_null() {
                 c["conditions"] = periods
@@ -143,6 +150,7 @@ async fn fetch_weather(state: &Shared) -> anyhow::Result<Value> {
                     "wind_text": p["windSpeed"],
                     "wind_direction": p["windDirection"],
                     "humidity": Value::Null,
+                    "pressure_trend": "steady",
                     "observed_at": p["startTime"],
                     "source": "forecast",
                 })
@@ -151,39 +159,133 @@ async fn fetch_weather(state: &Shared) -> anyhow::Result<Value> {
     };
 
     Ok(json!({
-        "location": "Dulac, Louisiana",
+        "location": "Cocodrie estuary, Louisiana",
         "current": current,
         "forecast": days,
         "updated_at": Utc::now(),
     }))
 }
 
-async fn current_conditions(state: &Shared, stations_url: Option<&str>) -> anyhow::Result<Value> {
-    let stations_url = stations_url.ok_or_else(|| anyhow::anyhow!("no observationStations url"))?;
+/// One normalized station observation. NOAA reports SI units with a nested
+/// `{ value, unitCode }` shape and frequent nulls; this flattens it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Observation {
+    pub at: DateTime<Utc>,
+    pub temp_c: Option<f64>,
+    pub wind_kmh: Option<f64>,
+    pub wind_gust_kmh: Option<f64>,
+    pub wind_dir_deg: Option<f64>,
+    pub humidity: Option<f64>,
+    pub pressure_pa: Option<f64>,
+    pub text: Option<String>,
+}
+
+/// Recent observations from the station nearest the fishing grounds, newest
+/// first (typically the last ~12 hours). Cached ~30 min and shared: the
+/// weather card reads the head of the list, the fishing forecast reads a
+/// barometric trend off the whole window.
+pub(crate) async fn recent_observations(state: &Shared) -> anyhow::Result<Vec<Observation>> {
+    if let Some(v) = cached(&state.cache.observations, OBS_TTL).await
+        && let Ok(obs) = serde_json::from_value::<Vec<Observation>>(v)
+    {
+        return Ok(obs);
+    }
+    let obs = fetch_observation_series(state).await?;
+    store(&state.cache.observations, serde_json::to_value(&obs)?).await;
+    Ok(obs)
+}
+
+async fn fetch_observation_series(state: &Shared) -> anyhow::Result<Vec<Observation>> {
+    let points = fetch_json(
+        state,
+        &format!("https://api.weather.gov/points/{FISHING_LAT},{FISHING_LON}"),
+    )
+    .await?;
+    let stations_url = points["properties"]["observationStations"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("no observationStations url in points response"))?;
     let stations = fetch_json(state, stations_url).await?;
     let station = stations["features"][0]["id"]
         .as_str()
-        .ok_or_else(|| anyhow::anyhow!("no observation station near the camp"))?
-        .to_string();
+        .ok_or_else(|| anyhow::anyhow!("no observation station near the fishing grounds"))?;
 
-    let obs = fetch_json(state, &format!("{station}/observations/latest")).await?;
-    let p = &obs["properties"];
+    let list = fetch_json(state, &format!("{station}/observations?limit=12")).await?;
+    let mut out: Vec<Observation> = list["features"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|f| {
+            let p = &f["properties"];
+            let at = p["timestamp"]
+                .as_str()
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())?
+                .with_timezone(&Utc);
+            Some(Observation {
+                at,
+                temp_c: p["temperature"]["value"].as_f64(),
+                wind_kmh: p["windSpeed"]["value"].as_f64(),
+                wind_gust_kmh: p["windGust"]["value"].as_f64(),
+                wind_dir_deg: p["windDirection"]["value"].as_f64(),
+                humidity: p["relativeHumidity"]["value"].as_f64(),
+                pressure_pa: p["barometricPressure"]["value"].as_f64(),
+                text: p["textDescription"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
+            })
+        })
+        .collect();
+    out.sort_by_key(|o| std::cmp::Reverse(o.at));
+    Ok(out)
+}
 
-    // Stations frequently report an empty textDescription; treat blank as
-    // absent so the card can fall back rather than render an empty line.
-    let conditions = p["textDescription"]
-        .as_str()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
+/// Direction of barometric change across the observation window, in millibars
+/// (newest reading minus the oldest within ~6 hours). Falling pressure — a
+/// front moving in — tends to trigger feeding; a rising glass behind it tends
+/// to shut it down. Returns the label and the signed change.
+pub(crate) fn pressure_trend(obs: &[Observation]) -> (&'static str, Option<f64>) {
+    let series: Vec<(DateTime<Utc>, f64)> = obs
+        .iter()
+        .filter_map(|o| o.pressure_pa.map(|pa| (o.at, pa / 100.0)))
+        .collect();
+    let Some(&(newest_at, newest)) = series.first() else {
+        return ("steady", None);
+    };
+    let cutoff = newest_at - Duration::hours(6);
+    let Some(&(_, oldest)) = series.iter().rfind(|(t, _)| *t >= cutoff) else {
+        return ("steady", None);
+    };
+    let delta = round1(newest - oldest);
+    let label = if delta <= -0.6 {
+        "falling"
+    } else if delta >= 0.6 {
+        "rising"
+    } else {
+        "steady"
+    };
+    (label, Some(delta))
+}
+
+async fn current_conditions(state: &Shared) -> anyhow::Result<Value> {
+    let obs = recent_observations(state).await?;
+    let latest = obs
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("no recent observations"))?;
+    let (trend, change) = pressure_trend(&obs);
 
     Ok(json!({
-        "temp_f": p["temperature"]["value"].as_f64().map(|c| round1(c_to_f(c))),
-        "conditions": conditions,
-        "wind_mph": p["windSpeed"]["value"].as_f64().map(|k| round1(kmh_to_mph(k))),
-        "wind_gust_mph": p["windGust"]["value"].as_f64().map(|k| round1(kmh_to_mph(k))),
-        "wind_direction_deg": p["windDirection"]["value"],
-        "humidity": p["relativeHumidity"]["value"].as_f64().map(|h| h.round()),
-        "observed_at": p["timestamp"],
+        "temp_f": latest.temp_c.map(|c| round1(c_to_f(c))),
+        "conditions": latest.text,
+        "wind_mph": latest.wind_kmh.map(|k| round1(kmh_to_mph(k))),
+        "wind_gust_mph": latest.wind_gust_kmh.map(|k| round1(kmh_to_mph(k))),
+        "wind_direction_deg": latest.wind_dir_deg,
+        "humidity": latest.humidity.map(|h| h.round()),
+        "pressure_mb": latest.pressure_pa.map(|pa| round1(pa / 100.0)),
+        "pressure_trend": trend,
+        "pressure_change_mb": change,
+        "observed_at": latest.at,
         "source": "observation",
     }))
 }
@@ -267,7 +369,7 @@ const SYNODIC_MONTH: f64 = 29.530_588_853;
 /// A known new moon: 2000-01-06 18:14 UTC, as a Julian date.
 const KNOWN_NEW_MOON_JD: f64 = 2_451_550.259_722;
 
-fn to_julian(dt: DateTime<Utc>) -> f64 {
+pub(crate) fn to_julian(dt: DateTime<Utc>) -> f64 {
     dt.timestamp() as f64 / 86_400.0 + 2_440_587.5
 }
 
@@ -279,12 +381,12 @@ fn from_julian(jd: f64) -> DateTime<Utc> {
 }
 
 /// Position within the current lunation, 0.0 at new moon, 0.5 at full.
-fn moon_fraction(dt: DateTime<Utc>) -> f64 {
+pub(crate) fn moon_fraction(dt: DateTime<Utc>) -> f64 {
     let age = (to_julian(dt) - KNOWN_NEW_MOON_JD).rem_euclid(SYNODIC_MONTH);
     age / SYNODIC_MONTH
 }
 
-fn phase_name(f: f64) -> (&'static str, &'static str) {
+pub(crate) fn phase_name(f: f64) -> (&'static str, &'static str) {
     // Quarters are instants, so give each a narrow band (roughly ±1 day)
     // and let the four broad phases fill the rest.
     match f {

@@ -19,6 +19,7 @@ pub mod my_stay;
 pub mod notifications;
 pub mod rate_limit;
 pub mod site_content;
+pub mod solunar;
 pub mod users;
 pub mod weather;
 
@@ -35,9 +36,19 @@ use std::{sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
 
-/// Dulac, Louisiana — used for the forecast grid and the solar calculation.
+/// Dulac, Louisiana — the camp's own physical location. Used only where that
+/// is what matters (the solar calculation for the moon/sun widget, "at the
+/// camp"). NOT for the on-the-water feeds — see `FISHING_LAT`/`FISHING_LON`.
 pub const CAMP_LAT: f64 = 29.3802;
 pub const CAMP_LON: f64 = -90.7148;
+
+/// The Cocodrie estuary — the open water people actually fish, ~15 miles south
+/// of the camp and matching NOAA tide station `8762928`. Wind and barometric
+/// pressure differ meaningfully between inland Dulac and the estuary; sun and
+/// moon position do not (15 miles is nothing there). Used for the weather feed
+/// and the solunar fishing forecast.
+pub const FISHING_LAT: f64 = 29.245;
+pub const FISHING_LON: f64 = -90.662;
 
 /// Process configuration, read once at startup.
 #[derive(Debug, Clone)]
@@ -115,6 +126,13 @@ pub struct CacheEntry {
 pub struct Caches {
     pub weather: RwLock<Option<CacheEntry>>,
     pub tides: RwLock<Option<CacheEntry>>,
+    /// A short rolling window of recent station observations (newest first),
+    /// shared by the weather card and the fishing forecast — the latter reads
+    /// a barometric trend off it, which a single latest reading can't give.
+    pub observations: RwLock<Option<CacheEntry>>,
+    /// The full solunar fishing forecast payload (astronomical windows plus the
+    /// weather-nudged star rating), sliced to the requested day count on return.
+    pub fishing: RwLock<Option<CacheEntry>>,
 }
 
 pub struct AppState {
@@ -292,7 +310,10 @@ pub fn router(state: Shared) -> Router {
         // ── environment feeds ──
         .route("/weather", get(weather::weather))
         .route("/tides", get(weather::tides))
-        .route("/lunar", get(weather::lunar));
+        .route("/lunar", get(weather::lunar))
+        // Reference-only, in the spirit of the lunar widget: solunar bite
+        // windows (pure astronomy) plus a 1–5 star rating nudged by weather.
+        .route("/fishing-forecast", get(solunar::fishing_forecast));
 
     Router::new()
         .nest("/api", api)
