@@ -458,6 +458,10 @@ export function FishingWidget() {
             </span>
           </div>
 
+          <p className="mt-2 text-xs text-muted">
+            {today.moon_phase} · {today.tide_strength} tide
+          </p>
+
           <div className="mt-4 grid grid-cols-2 gap-3 border-t border-sand pt-3 text-sm">
             <PeriodColumn label="Major periods" periods={today.major_periods} />
             <PeriodColumn label="Minor periods" periods={today.minor_periods} />
@@ -467,7 +471,7 @@ export function FishingWidget() {
             {data?.days.map((d) => (
               <div
                 key={d.date}
-                title={`${d.rating_label} · ${d.moon_phase}`}
+                title={`${d.rating_label} · ${d.moon_phase} · ${d.tide_strength} tide`}
                 className="min-w-[64px] flex-1 rounded-lg border border-sand bg-cream-dark/50 p-2 text-center"
               >
                 <p className="text-[11px] font-bold uppercase tracking-wide text-muted">

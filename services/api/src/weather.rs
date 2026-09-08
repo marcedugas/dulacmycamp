@@ -17,6 +17,8 @@ use std::time::{Duration as StdDuration, Instant};
 
 const WEATHER_TTL: StdDuration = StdDuration::from_secs(30 * 60);
 const TIDES_TTL: StdDuration = StdDuration::from_secs(60 * 60);
+/// Station datums are a decadal average — a day between refreshes is generous.
+const DATUMS_TTL: StdDuration = StdDuration::from_secs(24 * 60 * 60);
 /// Observations move a little faster than the forecast; refresh on the same
 /// cadence as the weather card that mostly drives them.
 const OBS_TTL: StdDuration = StdDuration::from_secs(30 * 60);
@@ -428,16 +430,69 @@ fn parse_tide_curve(data: &Value) -> anyhow::Result<Vec<Value>> {
     Ok(points)
 }
 
+/// The station's decadal-average tidal range (feet) — Great Diurnal Range,
+/// falling back to Mean Range of Tide — from the CO-OPS metadata API (the
+/// `datagetter` datums product was retired). Cached a day: it is a
+/// 2012–2016-epoch average and barely moves. `None` on any failure so the
+/// fishing forecast treats tide strength as neutral rather than blocking.
+pub(crate) async fn baseline_tidal_range(state: &Shared) -> Option<f64> {
+    if let Some(v) = cached(&state.cache.tide_datums, DATUMS_TTL).await {
+        return v.as_f64();
+    }
+    let station = &state.cfg.noaa_station_id;
+    let data = fetch_json(
+        state,
+        &format!(
+            "https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations/{station}/datums.json"
+        ),
+    )
+    .await
+    .ok()?;
+    let datums = data["datums"].as_array()?;
+    let value = |name: &str| {
+        datums
+            .iter()
+            .find(|d| d["name"].as_str() == Some(name))
+            .and_then(|d| d["value"].as_f64())
+    };
+    let range = value("GT").or_else(|| value("MN"))?;
+    // Cache only on success — a miss should retry (at most once an hour, since
+    // the forecast that calls this is itself cached), not stick for a day.
+    store(&state.cache.tide_datums, json!(range)).await;
+    Some(range)
+}
+
+/// The 7-day hi/lo predictions, read from the tide feed's cache (populating it
+/// if cold). Shared with `GET /api/tides` so the fishing forecast doesn't fetch
+/// the same data twice. Empty on failure — the caller drops the tide modifier.
+pub(crate) async fn tide_hilo(state: &Shared) -> Vec<Value> {
+    let blob = match cached(&state.cache.tides, TIDES_TTL).await {
+        Some(v) => v,
+        None => match fetch_tides(state).await {
+            Ok(v) => {
+                store(&state.cache.tides, v.clone()).await;
+                v
+            }
+            Err(e) => {
+                tracing::warn!(error = ?e, "tide feed unavailable for the fishing forecast");
+                return Vec::new();
+            }
+        },
+    };
+    blob["next_tides"].as_array().cloned().unwrap_or_default()
+}
+
 // ─────────────────────────── lunar + solar ───────────────────────────
 
 /// Mean length of one lunation, in days.
 pub(crate) const SYNODIC_MONTH: f64 = 29.530_588_853;
-/// Meeus' *mean* new-moon epoch (Astronomical Algorithms, eq. 49.1, k = 0):
-/// JDE 2451550.09766 ≈ 2000-01-06 14:20 UTC. It has to be the mean instant,
-/// not the apparent one, because we propagate it at the mean synodic rate: the
-/// apparent new moon of that date was ~3.9 h later, and anchoring there put a
-/// constant 3.9 h lag into every phase this function returns.
+/// Meeus' *mean* new-moon epoch (Astronomical Algorithms 2nd ed., eq. 49.1,
+/// k = 0): JDE 2451550.09766 ≈ 2000-01-06 14:20 UTC — the mean instant, which
+/// is the right anchor to propagate at the mean synodic rate.
 const KNOWN_NEW_MOON_JD: f64 = 2_451_550.097_66;
+/// Mean synodic month at J2000 (eq. 49.1's linear term) — a hair different from
+/// `SYNODIC_MONTH`, kept exact here because `phase_jde` propagates 300+ cycles.
+const MEAN_LUNATION: f64 = 29.530_588_861;
 
 pub(crate) fn to_julian(dt: DateTime<Utc>) -> f64 {
     dt.timestamp() as f64 / 86_400.0 + 2_440_587.5
@@ -450,10 +505,131 @@ fn from_julian(jd: f64) -> DateTime<Utc> {
         .unwrap_or_else(Utc::now)
 }
 
-/// Position within the current lunation, 0.0 at new moon, 0.5 at full.
-pub(crate) fn moon_fraction(dt: DateTime<Utc>) -> f64 {
-    let age = (to_julian(dt) - KNOWN_NEW_MOON_JD).rem_euclid(SYNODIC_MONTH);
-    age / SYNODIC_MONTH
+/// Julian Ephemeris Day of a new (`k` integer) or full (`k` + ½) moon, with the
+/// Meeus ch. 49 periodic corrections applied on top of the mean phase time.
+///
+/// A pure mean-motion estimate is off from the true (apparent) syzygy by up to
+/// ~14 h over a year — enough to land the phase *label* on the wrong calendar
+/// day. The correction series pulls that to a few minutes. ΔT (~+69 s in 2026)
+/// is neglected: it is far inside the accuracy this needs.
+pub(crate) fn phase_jde(k: f64) -> f64 {
+    let t = k / 1236.85;
+    let (t2, t3, t4) = (t * t, t * t * t, t * t * t * t);
+    let rad = std::f64::consts::PI / 180.0;
+    let tau = std::f64::consts::TAU;
+
+    let mut jde = KNOWN_NEW_MOON_JD + MEAN_LUNATION * k + 0.000_154_37 * t2 - 0.000_000_150 * t3
+        + 0.000_000_000_73 * t4;
+
+    let m = ((2.5534 + 29.105_356_70 * k - 0.000_000_14 * t2 - 0.000_000_11 * t3) * rad)
+        .rem_euclid(tau);
+    let mp = ((201.5643 + 385.816_935_28 * k + 0.010_758_2 * t2 + 0.000_012_38 * t3
+        - 0.000_000_058 * t4)
+        * rad)
+        .rem_euclid(tau);
+    let f = ((160.7108 + 390.670_502_84 * k - 0.001_611_8 * t2 - 0.000_002_27 * t3
+        + 0.000_000_011 * t4)
+        * rad)
+        .rem_euclid(tau);
+    let omega = ((124.7746 - 1.563_755_88 * k + 0.002_067_2 * t2 + 0.000_002_15 * t3) * rad)
+        .rem_euclid(tau);
+    let e = 1.0 - 0.002_516 * t - 0.000_007_4 * t2;
+
+    // New/full correction table (Meeus, p. 351) — identical for both.
+    jde += -0.407_20 * mp.sin()
+        + 0.172_41 * e * m.sin()
+        + 0.016_08 * (2.0 * mp).sin()
+        + 0.010_39 * (2.0 * f).sin()
+        + 0.007_39 * e * (mp - m).sin()
+        - 0.005_14 * e * (mp + m).sin()
+        + 0.002_08 * e * e * (2.0 * m).sin()
+        - 0.001_11 * (mp - 2.0 * f).sin()
+        - 0.000_57 * (mp + 2.0 * f).sin()
+        + 0.000_56 * e * (2.0 * mp + m).sin()
+        - 0.000_42 * (3.0 * mp).sin()
+        + 0.000_42 * e * (m + 2.0 * f).sin()
+        + 0.000_38 * e * (m - 2.0 * f).sin()
+        - 0.000_24 * e * (2.0 * mp - m).sin()
+        - 0.000_17 * omega.sin()
+        - 0.000_07 * (mp + 2.0 * m).sin()
+        + 0.000_04 * (2.0 * mp - 2.0 * f).sin()
+        + 0.000_04 * (3.0 * m).sin()
+        + 0.000_03 * (mp + m - 2.0 * f).sin()
+        + 0.000_03 * (2.0 * mp + 2.0 * f).sin()
+        - 0.000_03 * (mp + m + 2.0 * f).sin()
+        + 0.000_03 * (mp - m + 2.0 * f).sin()
+        - 0.000_02 * (mp - m - 2.0 * f).sin()
+        - 0.000_02 * (3.0 * mp + m).sin()
+        + 0.000_02 * (4.0 * mp).sin();
+
+    // Planetary-argument additive terms (Meeus, p. 252).
+    let a = |c0: f64, c1: f64, c2: f64| ((c0 + c1 * k + c2 * t2) * rad).sin();
+    jde += 0.000_325 * a(299.77, 0.107_408, -0.009_173)
+        + 0.000_165 * a(251.88, 0.016_321, 0.0)
+        + 0.000_164 * a(251.83, 26.651_886, 0.0)
+        + 0.000_126 * a(349.42, 36.412_478, 0.0)
+        + 0.000_110 * a(84.66, 18.206_239, 0.0)
+        + 0.000_062 * a(141.74, 53.303_771, 0.0)
+        + 0.000_060 * a(207.14, 2.453_732, 0.0)
+        + 0.000_056 * a(154.84, 7.306_860, 0.0)
+        + 0.000_047 * a(34.52, 27.261_239, 0.0)
+        + 0.000_042 * a(207.19, 0.121_824, 0.0)
+        + 0.000_040 * a(291.34, 1.844_379, 0.0)
+        + 0.000_037 * a(161.72, 24.198_154, 0.0)
+        + 0.000_035 * a(239.56, 25.513_099, 0.0)
+        + 0.000_023 * a(331.55, 3.592_518, 0.0);
+
+    jde
+}
+
+/// `k` for the new moon nearest `jd` (integer, as [`phase_jde`] takes it).
+fn nearest_new_moon_k(jd: f64) -> f64 {
+    ((jd - KNOWN_NEW_MOON_JD) / MEAN_LUNATION).round()
+}
+
+/// Unsigned days from `dt` to the nearest *true* new or full moon. This is the
+/// one distance the fishing rating's moon component keys on.
+pub(crate) fn days_to_nearest_syzygy(dt: DateTime<Utc>) -> f64 {
+    let jd = to_julian(dt);
+    let k0 = nearest_new_moon_k(jd);
+    let mut best = f64::MAX;
+    for dk in -1..=1 {
+        for half in [0.0, 0.5] {
+            best = best.min((jd - phase_jde(k0 + f64::from(dk) + half)).abs());
+        }
+    }
+    best
+}
+
+/// Fraction through the current lunation, bounded by the *true* new moons on
+/// either side of `dt`. Feeding this to [`phase_name`] (rather than a
+/// mean-motion age) keeps the label on the right calendar day near the annual
+/// extremes.
+pub(crate) fn true_moon_fraction(dt: DateTime<Utc>) -> f64 {
+    let jd = to_julian(dt);
+    let k = nearest_new_moon_k(jd);
+    let (mut prev, mut next) = (phase_jde(k), phase_jde(k + 1.0));
+    if prev > jd {
+        next = prev;
+        prev = phase_jde(k - 1.0);
+    } else if next <= jd {
+        prev = next;
+        next = phase_jde(k + 2.0);
+    }
+    ((jd - prev) / (next - prev)).clamp(0.0, 1.0)
+}
+
+/// The next full moon strictly after `from` (Meeus ch. 49).
+fn next_true_full_moon(from: DateTime<Utc>) -> DateTime<Utc> {
+    let jd = to_julian(from);
+    let k0 = nearest_new_moon_k(jd) - 1.0;
+    for i in 0..4 {
+        let full = phase_jde(k0 + f64::from(i) + 0.5);
+        if full > jd {
+            return from_julian(full);
+        }
+    }
+    from_julian(phase_jde(k0 + 2.5))
 }
 
 pub(crate) fn phase_name(f: f64) -> (&'static str, &'static str) {
@@ -539,29 +715,6 @@ fn sun_times(date: NaiveDate) -> SunTimes {
     }
 }
 
-/// The next instant the moon is full, found by scanning forward in hours and
-/// taking the point of maximum illumination. Good to within half an hour.
-fn next_full_moon(from: DateTime<Utc>) -> DateTime<Utc> {
-    let mut best = from;
-    let mut best_illum = -1.0;
-    for h in 0..=(24 * 30) {
-        let t = from + Duration::hours(h);
-        let f = moon_fraction(t);
-        // Only consider the window around fullness, so we return the *next*
-        // full moon rather than a local maximum in the current gibbous phase.
-        if (f - 0.5).abs() < 0.02 {
-            let i = illumination(f);
-            if i > best_illum {
-                best_illum = i;
-                best = t;
-            } else if best_illum > 0.0 {
-                break; // past the peak
-            }
-        }
-    }
-    best
-}
-
 /// `GET /api/lunar` — moon phase and sun times for the next 30 days.
 pub async fn lunar() -> Json<Value> {
     let now = Utc::now();
@@ -576,7 +729,7 @@ pub async fn lunar() -> Json<Value> {
             .and_hms_opt(17, 0, 0)
             .map(|d| d.and_utc())
             .unwrap_or(now);
-        let f = moon_fraction(noon);
+        let f = true_moon_fraction(noon);
         let (name, emoji) = phase_name(f);
         let sun = sun_times(date);
 
@@ -597,7 +750,7 @@ pub async fn lunar() -> Json<Value> {
     // widget shows the phase and today's sun times side by side, and taking
     // them from different instants can straddle a phase boundary and disagree.
     let today_entry = days.first().cloned().unwrap_or(Value::Null);
-    let full = next_full_moon(now);
+    let full = next_true_full_moon(now);
 
     Json(json!({
         "location": "Dulac, Louisiana",
@@ -621,38 +774,44 @@ pub async fn lunar() -> Json<Value> {
 mod tests {
     use super::*;
 
-    /// The reference epoch must read as a new moon.
+    /// A computed new-moon instant must read as a new moon and sit ~0 days from
+    /// the nearest syzygy.
     #[test]
-    fn known_new_moon_reads_as_new() {
-        let t = from_julian(KNOWN_NEW_MOON_JD);
-        let f = moon_fraction(t);
-        assert!(!(0.01..=0.99).contains(&f), "fraction was {f}");
-        assert_eq!(phase_name(f).0, "New Moon");
+    fn computed_new_moon_reads_as_new() {
+        let t = from_julian(phase_jde(325.0)); // a 2026 new moon
+        assert_eq!(phase_name(true_moon_fraction(t)).0, "New Moon");
+        assert!(
+            days_to_nearest_syzygy(t) < 0.05,
+            "{}",
+            days_to_nearest_syzygy(t)
+        );
     }
 
-    /// Half a lunation later the moon must be full and fully lit.
+    /// A computed full-moon instant must read as full and fully lit.
     #[test]
-    fn half_a_lunation_is_full() {
-        let t = from_julian(KNOWN_NEW_MOON_JD + SYNODIC_MONTH / 2.0);
-        let f = moon_fraction(t);
+    fn computed_full_moon_reads_as_full() {
+        let t = from_julian(phase_jde(325.5));
+        let f = true_moon_fraction(t);
         assert_eq!(phase_name(f).0, "Full Moon");
         assert!(
             illumination(f) > 0.99,
             "illumination was {}",
             illumination(f)
         );
+        assert!(days_to_nearest_syzygy(t) < 0.05);
     }
 
-    /// Cross-check against a published full moon: 2026-09-26 (Sept 2026).
+    /// Meeus ch. 49 must land the September 2026 full moon within an hour of
+    /// USNO's 2026-09-26 16:49 UTC — the correction terms' whole job.
     #[test]
-    fn next_full_moon_is_within_a_day_of_the_almanac() {
+    fn next_full_moon_matches_usno_to_the_hour() {
         let from = Utc.with_ymd_and_hms(2026, 9, 3, 12, 0, 0).unwrap();
-        let full = next_full_moon(from).date_naive();
-        let expected = NaiveDate::from_ymd_opt(2026, 9, 26).unwrap();
-        let delta = (full - expected).num_days().abs();
+        let full = next_true_full_moon(from);
+        let expected = Utc.with_ymd_and_hms(2026, 9, 26, 16, 49, 0).unwrap();
+        let off_min = (full - expected).num_minutes().abs();
         assert!(
-            delta <= 1,
-            "got {full}, expected within a day of {expected}"
+            off_min <= 60,
+            "got {full}, USNO {expected}, off {off_min} min"
         );
     }
 

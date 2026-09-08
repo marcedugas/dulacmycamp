@@ -133,6 +133,9 @@ pub struct Caches {
     /// The full solunar fishing forecast payload (astronomical windows plus the
     /// weather-nudged star rating), sliced to the requested day count on return.
     pub fishing: RwLock<Option<CacheEntry>>,
+    /// The tide station's decadal-average range (one number), for the fishing
+    /// forecast's tide-strength modifier. Refreshed daily.
+    pub tide_datums: RwLock<Option<CacheEntry>>,
 }
 
 pub struct AppState {

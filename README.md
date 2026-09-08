@@ -122,7 +122,8 @@ Then close the loop: set the API's `API_BASE_URL` to its own public URL and
 | Weather | `api.weather.gov` — `/points/{lat},{lon}` → forecast grid + nearest station's recent observations | 30 min |
 | Tides | NOAA CO-OPS `datagetter` — `interval=hilo` (7-day turning points) + `interval=h` (hourly curve, last ~6 h → next ~42 h) at station `8762928` | 1 h |
 | Moon & sun | Computed locally — no upstream | n/a |
-| Fishing forecast | Computed locally (solunar); star rating nudged by the weather feed | 1 h |
+| Fishing forecast | Computed locally (solunar); star rating shaped by weather + tide strength | 1 h |
+| Tide datums | CO-OPS metadata API — station Great Diurnal Range, for the tide-strength modifier | 24 h |
 
 `api.weather.gov` rejects requests without a `User-Agent`; ours identifies the
 app. Both proxied feeds are cached in-process because they change far more
@@ -136,14 +137,26 @@ south of the camp. That's the water people fish, and wind and pressure there
 differ meaningfully from inland Dulac. `CAMP_LAT`/`CAMP_LON` (the camp itself)
 still drive the "at the camp" sunrise/sunset, where 15 miles changes nothing.
 
-Moon phase comes from the mean synodic month (29.530589 d) against Meeus' *mean*
-new-moon epoch (JDE 2451550.09766). It's a mean model: the true new/full moon
-can lead or lag it by up to ~14 h over a year (the annual term), so the phase
-label can name a syzygy a calendar day early or late near the yearly extremes.
-That's fine for the widget and, since the fishing rating scores by *distance to
-the nearest new/full over a 2-day window* rather than by the razor-thin phase
-label, fine there too — a half-day of timing slack can't move a day out of the
-peak bracket. Sunrise and sunset use the standard NOAA sunrise equation.
+Moon phase uses Meeus' *Astronomical Algorithms* ch. 49: the mean phase time
+(JDE 2451550.09766 + 29.530588861·k) plus the periodic correction series. Mean
+motion alone strays up to ~±14 h from the true syzygy over a year (the annual
+term); the corrections pull it to under 4 minutes, so the phase *label* lands on
+the right calendar day year-round. The fishing rating's moon term keys on the
+same true distance-to-syzygy. Sunrise and sunset use the standard NOAA sunrise
+equation.
+
+**Fishing star rating.** `1 + moon(0–3) + pressure + wind + tide`, rounded to a
+whole star, clamped 1–5. The moon term is a continuous gradient — 3 on the day
+of new/full, tapering linearly to 0 at the quarters — so the day *of* a syzygy
+outscores the days flanking it (the old flat buckets defaulted ~27 of every
+29.5 days to 4–5 and left weather unable to move the needle). Pressure
+(falling-sharp +1.5 / falling +0.5 / rising −1, today only) and wind
+(calm +0.5 / >15 mph −1.5 / >25 mph −2.5) and **tide strength** all feed the
+same sum. Tide strength is the day's predicted range (highest high − lowest
+low) against the station's Great Diurnal Range: >1.15× → strong (+1),
+<0.75× → weak (−1). Unlike pressure, tide predictions are good weeks out, so
+this modifier applies to all seven days. A per-day `factors` object in the
+response breaks the score down (`pressure` present for today only).
 
 The fishing forecast needs the moon's actual *position*, not just its phase, so
 it carries a truncated form of Jean Meeus' lunar series (*Astronomical
@@ -188,25 +201,45 @@ transition.
 7. **`cargo new` produced a single crate**, not a workspace — the API is small
    enough that splitting it would be ceremony.
 
-8. **Solunar star rating scores by distance to syzygy, not the phase label.**
-   The spec's baseline table is phase-name-based (new/full 5, quarter 3,
-   shoulder 4). Read literally against `phase_name`, whose "New Moon" band is
-   only ~±0.6 days wide, exactly one calendar day per lunation could score the
-   syzygy bonus — and the mean-synodic model's ~±14 h annual timing error
-   decided *which* day (it landed the Sept 2026 peak on Friday the 11th when the
-   new moon was Thursday the 10th local). The rating now scores by days to the
-   nearest new/full over a 2-day window, which produces the same new/full/quarter
-   values but as the multi-day bracket a real solunar table shows. `phase_name`
-   itself is unchanged — the lunar widget still wants one crisp label.
+8. **Solunar star rating is a continuous moon gradient, not the phase-bucket
+   table.** The addendum's baseline table (new/full 5, quarter 3, shoulder 4) defaulted
+   ~27 of every ~29.5 days to 4–5 before any weather modifier, and modifiers
+   only subtracted — the effective range was ~3–5, not 1–5. The rating is now a
+   continuous gradient (`1 + moon(0–3)`, moon peaking on the day of the syzygy)
+   plus wider weather/tide modifiers, so the full 1–5 range is used. `phase_name`
+   is unchanged — the lunar widget still wants one crisp label.
 
 9. **Solunar star rating: barometric nudge is today-only.** The pressure trend
    is a *now* signal read from live observations; the forecast feed carries no
-   pressure, so days 2–7 are scored on the moon and forecast wind alone. Also,
+   pressure, so days 2–7 are scored on the moon, wind and tide alone. Also,
    a calendar day sometimes shows one major window rather than two — the second
    transit has simply crossed local midnight into the next day, where it's
    listed. Minor windows are ~1 h per the spec (some hobby tables use 2 h).
 
-10. **Tide `curve` timestamps are the station's local wall-clock string**
+10. **Whole stars, not half-stars.** The rebalance's continuous score is rounded
+    to a whole star for display. `stars` stays an integer 1–5 and the frontend
+    is unchanged; the raw contributions are in the response's per-day `factors`
+    for anyone who wants them. Half-star precision would overstate what a
+    "fun guide" solunar score can claim.
+
+11. **Tide strength is real predicted flow, not a phase proxy.** The addendum
+    assumed strong tides fall on the new/full moon ("spring tides… will double
+    up with the moon bonus"). That holds on Atlantic coasts; the northern Gulf
+    is different. At Cocodrie the daily range tracks the **Moon's declination**
+    (a ~27-day cycle that regresses, unrelated to phase), so the biggest ranges
+    often land at the quarters and the *smallest* at new/full — near a node the
+    new moon's range drops to ~0.3 ft against a 1.05 ft baseline. The modifier
+    keys on the station's own predicted range, so it reflects actual water
+    movement: some weeks it doubles the moon bonus, some weeks (like the
+    2026-09-11 new moon) it works against it. That is the honest signal, not a
+    bug — a dead 0.3 ft tide really does fish worse than a moving 1.4 ft one.
+
+12. **Datums from the CO-OPS metadata API, not the `datagetter` datums
+    product** — NOAA retired the latter. `baseline_tidal_range` reads Great
+    Diurnal Range (GT) from `.../mdapi/prod/webapi/stations/{id}/datums.json`,
+    cached a day; `None` on any failure drops the tide modifier to neutral.
+
+13. **Tide `curve` timestamps are the station's local wall-clock string**
     (`"YYYY-MM-DD HH:MM"`), not the UTC `…Z` the fishing-forecast spec sketched.
     The hi/lo `next_tides` list has always used that format and stays unchanged;
     keeping the curve on the same string lets the widget put both series — and

@@ -7,8 +7,10 @@
 //! 1. **When** — major and minor bite windows, pure astronomy, weather plays no
 //!    part. Majors (~2 h) bracket the moon's upper and lower transit; minors
 //!    (~1 h) bracket moonrise and moonset.
-//! 2. **How good** — a 1–5 star rating from the moon phase, nudged by the
-//!    barometric trend and the wind.
+//! 2. **How good** — a 1–5 star rating: `1 + moon(0–3) + pressure + wind +
+//!    tide`, rounded to a whole star. The moon term is a continuous gradient
+//!    (peak on the day of new/full, 0 at the quarters); the weather/tide
+//!    modifiers are wide enough to genuinely move it, not just nudge.
 //!
 //! The hard part is the moon's actual position. The lunar widget's phase maths
 //! (mean synodic month) says nothing about *where* the moon is, which is what
@@ -378,46 +380,85 @@ fn moon_events(date: NaiveDate) -> MoonEvents {
 }
 
 // ─────────────────────────── star rating ───────────────────────────
+//
+// `1 + moon(0–3) + pressure + wind + tide`, rounded to a whole star, clamped
+// 1–5. The moon term is a continuous gradient (peak on the day of new/full,
+// tapering to 0 at the quarters) rather than the old flat 4/5/3 buckets, which
+// defaulted ~27 of every ~29.5 days to 4 or 5 and left weather barely able to
+// move the score. The weather modifiers are wide enough to actually swing it.
 
-/// Days a full or new moon's pull is considered "on" — the strong solunar
-/// window is a bracket of a few days around each syzygy, not the instant. Real
-/// solunar tables rate roughly this span at the top.
-const SYZYGY_WINDOW_DAYS: f64 = 2.0;
-/// Same idea around each quarter, for the low score.
-const QUARTER_WINDOW_DAYS: f64 = 2.0;
+/// Days from a syzygy out to the adjacent quarter — the moon term's zero point.
+fn quarter_days() -> f64 {
+    weather::SYNODIC_MONTH / 4.0
+}
 
-/// Baseline score (per the spec's phase table: syzygies 5, quarters 3,
-/// shoulders 4) but keyed on the *distance in days* to the nearest new/full or
-/// quarter rather than on the phase label.
-///
-/// The label bands in `weather::phase_name` are only ~±0.6 days wide, so with
-/// one sample per calendar day exactly one day could ever score the syzygy
-/// bonus — and which day that was hinged on sub-day timing the mean-synodic
-/// phase model doesn't resolve (it can be a dozen-plus hours off near the
-/// annual extremes). Widening to a real window makes the rating stable and
-/// matches how a solunar table actually reads.
-fn moon_score(fraction: f64) -> i32 {
-    let cycle = weather::SYNODIC_MONTH;
-    let cycle_days = fraction * cycle;
-    // Distance in days to the nearer of new (0) or full (½ cycle).
-    let to_syzygy = cycle_days
-        .min(cycle - cycle_days)
-        .min((cycle_days - cycle / 2.0).abs());
-    // Distance to the nearer quarter (¼ and ¾ cycle).
-    let to_quarter = (cycle_days - cycle / 4.0)
-        .abs()
-        .min((cycle_days - 3.0 * cycle / 4.0).abs());
+/// Moon contribution, 0–3 points: 3 at an exact new or full moon, ramping
+/// linearly to 0 at the first/last quarter (~7.4 days away). Keyed on the same
+/// true distance-to-syzygy the phase label now uses.
+fn moon_component(days_to_syzygy: f64) -> f64 {
+    (3.0 * (1.0 - days_to_syzygy / quarter_days())).clamp(0.0, 3.0)
+}
 
-    if to_syzygy <= SYZYGY_WINDOW_DAYS {
-        5
-    } else if to_quarter <= QUARTER_WINDOW_DAYS {
-        3
-    } else {
-        4
+/// Barometric modifier. A glass falling ahead of a front is the classic bite
+/// signal; a sharp fall more so. Today only — the forecast feed has no pressure.
+fn pressure_modifier(trend: &str, delta_mb: Option<f64>) -> f64 {
+    match trend {
+        "falling" if delta_mb.is_some_and(|d| d <= -2.0) => 1.5,
+        "falling" => 0.5,
+        "rising" => -1.0,
+        _ => 0.0,
     }
 }
 
-fn rating_label(stars: i32) -> &'static str {
+/// Wind modifier. A slick calm fishes well; a hard blow flattens it.
+fn wind_modifier(mph: Option<f64>) -> f64 {
+    match mph {
+        Some(w) if w > 25.0 => -2.5,
+        Some(w) if w > 15.0 => -1.5,
+        Some(w) if w < 5.0 => 0.5,
+        _ => 0.0, // 5–15 mph, or unknown
+    }
+}
+
+/// Tide-strength modifier — more water moving means more bait moving.
+fn tide_modifier(strength: &str) -> f64 {
+    match strength {
+        "strong" => 1.0,
+        "weak" => -1.0,
+        _ => 0.0,
+    }
+}
+
+/// `"strong" | "average" | "weak"` from a day's predicted range against the
+/// station's Great Diurnal Range. Neutral when either figure is missing.
+fn tide_strength(day_range: Option<f64>, baseline: Option<f64>) -> &'static str {
+    match (day_range, baseline) {
+        (Some(r), Some(b)) if b > 0.0 => match r / b {
+            x if x > 1.15 => "strong",
+            x if x < 0.75 => "weak",
+            _ => "average",
+        },
+        _ => "average",
+    }
+}
+
+/// Highest high minus lowest low among a calendar day's hi/lo predictions.
+fn day_tide_range(hilo: &[Value], date: NaiveDate) -> Option<f64> {
+    let prefix = date.format("%Y-%m-%d").to_string();
+    let heights: Vec<f64> = hilo
+        .iter()
+        .filter(|p| p["time"].as_str().is_some_and(|t| t.starts_with(&prefix)))
+        .filter_map(|p| p["height_ft"].as_f64())
+        .collect();
+    if heights.len() < 2 {
+        return None;
+    }
+    let hi = heights.iter().copied().fold(f64::MIN, f64::max);
+    let lo = heights.iter().copied().fold(f64::MAX, f64::min);
+    Some(hi - lo)
+}
+
+fn rating_label(stars: i64) -> &'static str {
     match stars {
         5 => "Excellent",
         4 => "Good",
@@ -426,8 +467,10 @@ fn rating_label(stars: i32) -> &'static str {
     }
 }
 
-fn star_rating(fraction: f64, pressure_mod: i32, wind_mod: i32) -> i32 {
-    (moon_score(fraction) + pressure_mod + wind_mod).clamp(1, 5)
+fn star_rating(moon: f64, pressure: f64, wind: f64, tide: f64) -> i64 {
+    (1.0 + moon + pressure + wind + tide)
+        .round()
+        .clamp(1.0, 5.0) as i64
 }
 
 // ─────────────────────────── HTTP ───────────────────────────
@@ -466,30 +509,32 @@ async fn build_forecast(state: &Shared) -> anyhow::Result<Value> {
     let now = Utc::now();
     let today = now.with_timezone(&Chicago).date_naive();
 
-    // Weather inputs are best-effort: the bite windows stand on their own, and a
-    // missing feed just means the rating falls back to the phase alone.
+    // Every feed here is best-effort: a missing one drops its modifier to
+    // neutral and the forecast still renders on the moon term alone.
     let observations = weather::recent_observations(state)
         .await
         .unwrap_or_default();
-    let (trend, _change) = weather::pressure_trend(&observations);
-    let pressure_mod = match trend {
-        "falling" => 1,
-        "rising" => -1,
-        _ => 0,
-    };
+    let (trend, delta_mb) = weather::pressure_trend(&observations);
+    let today_pressure_mod = pressure_modifier(trend, delta_mb);
+
     let live_wind_mph = observations
         .first()
         .and_then(|o| o.wind_kmh)
         .map(weather::kmh_to_mph);
     let forecast_wind = forecast_wind_by_day(state).await.unwrap_or_default();
 
+    // Tide predictions are accurate weeks out, so — unlike pressure — the tide
+    // modifier applies to every forecast day, not just today.
+    let hilo = weather::tide_hilo(state).await;
+    let baseline_range = weather::baseline_tidal_range(state).await;
+
     let mut days = Vec::with_capacity(MAX_DAYS as usize);
     for offset in 0..MAX_DAYS {
         let date = today + Duration::days(offset);
         // Sample the phase at local noon, as the lunar widget does.
         let noon = to_utc(date.and_hms_opt(12, 0, 0).expect("valid noon"));
-        let fraction = weather::moon_fraction(noon);
-        let (phase, emoji) = weather::phase_name(fraction);
+        let (phase, emoji) = weather::phase_name(weather::true_moon_fraction(noon));
+        let moon = moon_component(weather::days_to_nearest_syzygy(noon));
 
         let events = moon_events(date);
 
@@ -499,14 +544,23 @@ async fn build_forecast(state: &Shared) -> anyhow::Result<Value> {
         } else {
             forecast_wind.get(&date).copied()
         };
-        let wind_mod = if wind_mph.is_some_and(|w| w > 15.0) {
-            -1
-        } else {
-            0
-        };
+        let wind_mod = wind_modifier(wind_mph);
+
+        let strength = tide_strength(day_tide_range(&hilo, date), baseline_range);
+        let tide_mod = tide_modifier(strength);
+
         // The barometric trend is a *now* signal; only today gets it.
-        let pressure_mod = if offset == 0 { pressure_mod } else { 0 };
-        let stars = star_rating(fraction, pressure_mod, wind_mod);
+        let pressure_mod = if offset == 0 { today_pressure_mod } else { 0.0 };
+        let stars = star_rating(moon, pressure_mod, wind_mod, tide_mod);
+
+        let mut factors = json!({
+            "moon": round2(moon),
+            "wind": wind_mod,
+            "tide": tide_mod,
+        });
+        if offset == 0 {
+            factors["pressure"] = json!(pressure_mod);
+        }
 
         days.push(json!({
             "date": date,
@@ -514,6 +568,8 @@ async fn build_forecast(state: &Shared) -> anyhow::Result<Value> {
             "rating_label": rating_label(stars),
             "moon_phase": phase,
             "moon_emoji": emoji,
+            "tide_strength": strength,
+            "factors": factors,
             "major_periods": periods(&[events.upper_transit, events.lower_transit], MAJOR_HALF),
             "minor_periods": periods(&[events.moonrise, events.moonset], MINOR_HALF),
         }));
@@ -526,6 +582,10 @@ async fn build_forecast(state: &Shared) -> anyhow::Result<Value> {
         "disclaimer": "Based on solunar theory — a fun guide, not a guarantee!",
         "days": days,
     }))
+}
+
+fn round2(v: f64) -> f64 {
+    (v * 100.0).round() / 100.0
 }
 
 /// `{start, end}` in local `HH:MM` for each present centre, sorted by start.
@@ -708,50 +768,102 @@ mod tests {
         assert_local_near(ev.moonset, "17:51", 5);
     }
 
-    fn app_new_moon_near(anchor: DateTime<Utc>) -> DateTime<Utc> {
-        let mut best = anchor;
-        let mut best_dist = 1.0;
-        for min in -(3 * 24 * 60)..=(3 * 24 * 60) {
-            let t = anchor + Duration::minutes(min);
-            let f = weather::moon_fraction(t);
-            let dist = f.min(1.0 - f);
-            if dist < best_dist {
-                best_dist = dist;
-                best = t;
-            }
-        }
-        best
+    // USNO syzygies for 2026, UTC (aa.usno.navy.mil). `frac` is 0.0 for a new
+    // moon, 0.5 for a full moon — the argument `weather::phase_jde` takes.
+    const USNO_2026: &[(f64, u32, u32, u32, u32)] = &[
+        (0.5, 1, 3, 10, 3),
+        (0.0, 1, 18, 19, 52),
+        (0.5, 2, 1, 22, 9),
+        (0.0, 2, 17, 12, 1),
+        (0.5, 3, 3, 11, 38),
+        (0.0, 3, 19, 1, 23),
+        (0.5, 4, 2, 2, 12),
+        (0.0, 4, 17, 11, 52),
+        (0.5, 5, 1, 17, 23),
+        (0.0, 5, 16, 20, 1),
+        (0.5, 5, 31, 8, 45),
+        (0.0, 6, 15, 2, 54),
+        (0.5, 6, 29, 23, 56),
+        (0.0, 7, 14, 9, 43),
+        (0.5, 7, 29, 14, 36),
+        (0.0, 8, 12, 17, 37),
+        (0.5, 8, 28, 4, 18),
+        (0.0, 9, 11, 3, 27),
+        (0.5, 9, 26, 16, 49),
+        (0.0, 10, 10, 15, 50),
+        (0.5, 10, 26, 4, 12),
+        (0.0, 11, 9, 7, 2),
+        (0.5, 11, 24, 14, 53),
+        (0.0, 12, 9, 0, 52),
+        (0.5, 12, 24, 1, 28),
+    ];
+
+    /// Mean phase time — `phase_jde` with the periodic corrections stripped —
+    /// for the "before" column.
+    fn mean_phase_jde(k: f64) -> f64 {
+        let t = k / 1236.85;
+        2_451_550.097_66 + 29.530_588_861 * k + 0.000_154_37 * t * t
     }
 
     #[test]
-    #[ignore = "diagnostic: app mean new moon vs USNO true new moon, all of 2026"]
-    fn print_new_moon_offsets() {
-        // USNO true new moons, 2026, UTC.
-        let usno: &[(i32, u32, u32, u32, u32)] = &[
-            (2026, 1, 18, 19, 52),
-            (2026, 2, 17, 12, 1),
-            (2026, 3, 19, 1, 23),
-            (2026, 4, 17, 11, 52),
-            (2026, 5, 16, 20, 1),
-            (2026, 6, 15, 2, 54),
-            (2026, 7, 14, 9, 43),
-            (2026, 8, 12, 17, 37),
-            (2026, 9, 11, 3, 27),
-            (2026, 10, 10, 15, 50),
-            (2026, 11, 9, 7, 2),
-            (2026, 12, 9, 0, 52),
-        ];
-        for &(y, m, d, hh, mm) in usno {
-            let truth = Utc.with_ymd_and_hms(y, m, d, hh, mm, 0).unwrap();
-            let app = app_new_moon_near(truth);
-            let off_h = (app - truth).num_minutes() as f64 / 60.0;
+    #[ignore = "diagnostic: mean vs Meeus-corrected phase time vs USNO, 2026"]
+    fn print_syzygy_offsets() {
+        let mut mean_min = f64::MAX;
+        let mut mean_max = f64::MIN;
+        let mut corr_min = f64::MAX;
+        let mut corr_max = f64::MIN;
+        for &(frac, m, d, hh, mm) in USNO_2026 {
+            let truth = Utc.with_ymd_and_hms(2026, m, d, hh, mm, 0).unwrap();
+            let jd = weather::to_julian(truth);
+            let center = ((jd - 2_451_550.097_66) / 29.530_588_861).round();
+            let k = (-1..=1)
+                .map(|dk| center + f64::from(dk) + frac)
+                .min_by(|a, b| {
+                    (weather::phase_jde(*a) - jd)
+                        .abs()
+                        .total_cmp(&(weather::phase_jde(*b) - jd).abs())
+                })
+                .unwrap();
+            let mean_h = (mean_phase_jde(k) - jd) * 24.0;
+            let corr_h = (weather::phase_jde(k) - jd) * 24.0;
+            mean_min = mean_min.min(mean_h);
+            mean_max = mean_max.max(mean_h);
+            corr_min = corr_min.min(corr_h);
+            corr_max = corr_max.max(corr_h);
+            let kind = if frac == 0.0 { "new " } else { "full" };
             eprintln!(
-                "{y}-{m:02} USNO {} UTC | app {} UTC | app is {off_h:+.1} h | local dates: USNO {}, app {}",
-                truth.format("%d %H:%M"),
-                app.format("%d %H:%M"),
-                truth.with_timezone(&Chicago).format("%m-%d"),
-                app.with_timezone(&Chicago).format("%m-%d"),
+                "2026-{m:02}-{d:02} {kind} | mean {mean_h:+5.1} h | corrected {corr_h:+5.2} h",
             );
+        }
+        eprintln!(
+            "\nmean offset range     : {mean_min:+.1} h .. {mean_max:+.1} h  (span {:.1} h)",
+            mean_max - mean_min
+        );
+        eprintln!(
+            "corrected offset range: {corr_min:+.2} h .. {corr_max:+.2} h  (span {:.2} h)",
+            corr_max - corr_min
+        );
+    }
+
+    /// Nearest `phase_jde` of the given type (`frac` 0.0 new / 0.5 full) to `jd`,
+    /// and its signed offset in hours. `round()` alone picks the nearest *new*
+    /// moon, which can be a cycle off for a full-moon date near the midpoint.
+    fn nearest_phase_offset_h(jd: f64, frac: f64) -> f64 {
+        let center = ((jd - 2_451_550.097_66) / 29.530_588_861).round();
+        (-1..=1)
+            .map(|dk| (weather::phase_jde(center + f64::from(dk) + frac) - jd) * 24.0)
+            .min_by(|a, b| a.abs().total_cmp(&b.abs()))
+            .unwrap()
+    }
+
+    /// The correction terms must pull every 2026 syzygy to within ~2 h of USNO
+    /// (mean motion alone strays to ~±14 h).
+    #[test]
+    fn meeus_corrections_match_usno_within_two_hours() {
+        for &(frac, m, d, hh, mm) in USNO_2026 {
+            let jd = weather::to_julian(Utc.with_ymd_and_hms(2026, m, d, hh, mm, 0).unwrap());
+            let off_h = nearest_phase_offset_h(jd, frac).abs();
+            assert!(off_h <= 2.0, "2026-{m:02}-{d:02}: off {off_h:.2} h");
         }
     }
 
@@ -784,68 +896,102 @@ mod tests {
     }
 
     #[test]
-    fn moon_score_by_distance_to_syzygy() {
-        let at = |days_after_new: f64| (days_after_new / weather::SYNODIC_MONTH).rem_euclid(1.0);
-        // New and full score the top, and hold across a ~2-day shoulder.
-        assert_eq!(moon_score(0.0), 5);
-        assert_eq!(moon_score(0.5), 5);
-        assert_eq!(moon_score(at(1.9)), 5);
-        assert_eq!(moon_score(at(-1.9)), 5);
-        // Just past the syzygy window drops to the shoulder score.
-        assert_eq!(moon_score(at(2.4)), 4);
-        // Mid-crescent / mid-gibbous.
-        assert_eq!(moon_score(at(3.7)), 4);
-        // Quarters and their ~2-day shoulder score the low.
-        assert_eq!(moon_score(0.25), 3);
-        assert_eq!(moon_score(0.75), 3);
-        assert_eq!(moon_score(at(7.383 - 1.9)), 3);
+    fn moon_component_is_a_continuous_gradient() {
+        let q = quarter_days();
+        // 3 at the syzygy, 0 at the quarter, linear between.
+        assert!((moon_component(0.0) - 3.0).abs() < 1e-9);
+        assert!((moon_component(q) - 0.0).abs() < 1e-9);
+        assert!((moon_component(q / 2.0) - 1.5).abs() < 1e-9);
+        // The day *of* the new moon must beat the day after — the whole point
+        // of dropping the flat buckets.
+        assert!(moon_component(0.3) > moon_component(1.3));
+        assert!(moon_component(1.3) > moon_component(2.3));
+        // Past the quarter it stays pinned at 0, never negative.
+        assert_eq!(moon_component(q + 3.0), 0.0);
     }
 
     #[test]
-    fn star_rating_clamps_and_combines() {
-        let (new, full, quarter) = (0.0, 0.5, 0.25);
-        // New moon, pressure falling, calm: 5 + 1 clamps to 5.
-        assert_eq!(star_rating(new, 1, 0), 5);
-        // Full moon, pressure rising, blowing 20: 5 - 1 - 1 = 3.
-        assert_eq!(star_rating(full, -1, -1), 3);
-        // Quarter, rising, windy: 3 - 1 - 1 = 1 (floor).
-        assert_eq!(star_rating(quarter, -1, -1), 1);
-        // Can't go below 1.
-        assert_eq!(star_rating(quarter, -1, -1), 1);
-        // Shoulder baseline, neutral modifiers.
-        assert_eq!(
-            star_rating((3.7_f64 / weather::SYNODIC_MONTH).rem_euclid(1.0), 0, 0),
-            4
-        );
+    fn weather_modifiers_have_the_specified_shape() {
+        assert_eq!(pressure_modifier("falling", Some(-2.5)), 1.5);
+        assert_eq!(pressure_modifier("falling", Some(-1.0)), 0.5);
+        assert_eq!(pressure_modifier("falling", None), 0.5);
+        assert_eq!(pressure_modifier("steady", Some(0.1)), 0.0);
+        assert_eq!(pressure_modifier("rising", Some(1.5)), -1.0);
+
+        assert_eq!(wind_modifier(Some(3.0)), 0.5);
+        assert_eq!(wind_modifier(Some(10.0)), 0.0);
+        assert_eq!(wind_modifier(None), 0.0);
+        assert_eq!(wind_modifier(Some(18.0)), -1.5);
+        assert_eq!(wind_modifier(Some(30.0)), -2.5);
     }
 
-    /// Regression — the September 2026 new-moon transition, Cocodrie /
-    /// America-Chicago.
-    ///
-    /// USNO puts the new moon at 2026-09-11 03:27 UTC = **2026-09-10 22:27
-    /// local (Thursday)**. The mean-synodic phase model the rating reads runs
-    /// ~13 h late that month (the annual term is near its yearly maximum), and
-    /// the old `phase_name` band was only ~±0.6 days wide — so exactly one
-    /// calendar day could ever score the syzygy bonus, and the lateness put it
-    /// on Friday the 11th. Scoring by distance-to-syzygy over a 2-day window
-    /// gives Thursday a clean 5 and makes the peak the bracket it should be.
     #[test]
-    fn peak_rating_brackets_the_sept_2026_new_moon() {
-        let score = |day: u32| {
+    fn star_rating_spans_the_full_range_and_clamps() {
+        // Quarter moon (0), rough weather: 1 + 0 - 1 - 2.5 - 1 = clamps to 1.
+        assert_eq!(star_rating(0.0, -1.0, -2.5, -1.0), 1);
+        // Quarter, neutral weather: 1 + 0 = 1 — a genuine floor day.
+        assert_eq!(star_rating(0.0, 0.0, 0.0, 0.0), 1);
+        // Mid-gradient (1.5), neutral: 1 + 1.5 = 2.5 → rounds to 3... check:
+        assert_eq!(star_rating(1.5, 0.0, 0.0, 0.0), 3);
+        // New moon (3), calm + strong tide: 1 + 3 + 0.5 + 1 = 5.5 → clamps to 5.
+        assert_eq!(star_rating(3.0, 0.0, 0.5, 1.0), 5);
+        // New moon, rising glass + wind + weak tide: 1 + 3 - 1 - 1.5 - 1 = 0.5 → 1.
+        assert_eq!(star_rating(3.0, -1.0, -1.5, -1.0), 1);
+    }
+
+    #[test]
+    fn tide_strength_thresholds() {
+        assert_eq!(tide_strength(Some(1.30), Some(1.05)), "strong"); // ratio 1.24
+        assert_eq!(tide_strength(Some(1.05), Some(1.05)), "average");
+        assert_eq!(tide_strength(Some(0.70), Some(1.05)), "weak"); // ratio 0.67
+        // Missing either figure → neutral, never a crash.
+        assert_eq!(tide_strength(None, Some(1.05)), "average");
+        assert_eq!(tide_strength(Some(1.5), None), "average");
+    }
+
+    #[test]
+    fn day_tide_range_picks_the_extremes() {
+        let hilo = json!([
+            { "time": "2026-09-08 03:00", "height_ft": 1.6, "kind": "high" },
+            { "time": "2026-09-08 15:00", "height_ft": 0.2, "kind": "low" },
+            { "time": "2026-09-09 04:00", "height_ft": 1.1, "kind": "high" },
+        ]);
+        let hilo = hilo.as_array().unwrap();
+        assert!((day_tide_range(hilo, date(2026, 9, 8)).unwrap() - 1.4).abs() < 1e-9);
+        assert_eq!(day_tide_range(hilo, date(2026, 9, 9)), None); // one point only
+        assert_eq!(day_tide_range(hilo, date(2026, 9, 10)), None); // no points
+    }
+
+    /// A strong-tide day outscores a weak-tide day at the same moon phase and
+    /// weather — the whole reason tide was folded in.
+    #[test]
+    fn strong_tide_beats_weak_tide_at_equal_phase() {
+        let moon = moon_component(3.5); // mid-gradient, a shoulder day
+        let strong = star_rating(moon, 0.0, 0.0, tide_modifier("strong"));
+        let weak = star_rating(moon, 0.0, 0.0, tide_modifier("weak"));
+        assert!(strong > weak, "strong {strong} should beat weak {weak}");
+        assert_eq!(strong - weak, 2); // +1 vs -1
+    }
+
+    /// Regression — September 2026 new moon, Cocodrie / America-Chicago.
+    /// USNO: 2026-09-11 03:27 UTC = 2026-09-10 22:27 local (Thursday). With the
+    /// true-phase distance and the continuous gradient, Thursday the 10th scores
+    /// at (or within a rounding step of) the moon-term ceiling, and clearly
+    /// above days 3+ away.
+    #[test]
+    fn sept_2026_new_moon_peak_is_a_real_gradient() {
+        let moon = |day: u32| {
             let noon = to_utc(date(2026, 9, day).and_hms_opt(12, 0, 0).unwrap());
-            moon_score(weather::moon_fraction(noon))
+            moon_component(weather::days_to_nearest_syzygy(noon))
         };
-        assert_eq!(
-            score(10),
-            5,
-            "Thursday Sept 10 — the true local new-moon day"
-        );
-        assert_eq!(score(11), 5, "Friday Sept 11");
-        let peak: Vec<u32> = (6..=16).filter(|&d| score(d) == 5).collect();
-        assert!(
-            peak.len() >= 3 && peak.contains(&10) && peak.contains(&11),
-            "expected a multi-day peak including the 10th and 11th, got {peak:?}"
-        );
+        // Thu 10 and Fri 11 straddle the true new moon (Sept 11 03:27 UTC), both
+        // within ~0.5 day of it, so both sit near the moon-term ceiling of 3.
+        assert!(moon(10) > 2.7, "Thu 10 moon term {}", moon(10));
+        assert!(moon(11) > 2.7, "Fri 11 moon term {}", moon(11));
+        // A real taper on either side — the days out score progressively lower.
+        assert!(moon(11) > moon(9));
+        assert!(moon(9) > moon(7));
+        assert!(moon(13) < moon(11));
     }
 
     #[test]
@@ -863,6 +1009,69 @@ mod tests {
         assert_eq!(parse_wind_mph("10 to 15 mph"), Some(15.0));
         assert_eq!(parse_wind_mph("calm"), None);
         assert_eq!(parse_wind_mph("5 to 20 mph"), Some(20.0));
+    }
+
+    /// Old (bucket) vs new (gradient) star distribution across all of 2026,
+    /// under calm / typical / rough weather. Proof the rebalance widened the
+    /// effective range — the old formula puts almost nothing below 3.
+    #[test]
+    #[ignore = "diagnostic: full-year star distribution, old formula vs new"]
+    fn print_star_distribution() {
+        let cycle = weather::SYNODIC_MONTH;
+
+        // Faithful reproduction of the retired bucket formula (mean fraction).
+        let old_moon = |noon: DateTime<Utc>| -> i64 {
+            let cd =
+                (weather::to_julian(noon) - 2_451_550.097_66).rem_euclid(cycle) / cycle * cycle;
+            let to_syz = cd.min(cycle - cd).min((cd - cycle / 2.0).abs());
+            let to_qtr = (cd - cycle / 4.0).abs().min((cd - 3.0 * cycle / 4.0).abs());
+            if to_syz <= 2.0 {
+                5
+            } else if to_qtr <= 2.0 {
+                3
+            } else {
+                4
+            }
+        };
+
+        let scenarios = ["calm/steady", "typical variability", "rough"];
+        for (si, name) in scenarios.iter().enumerate() {
+            let mut old_hist = [0usize; 6];
+            let mut new_hist = [0usize; 6];
+            let start = date(2026, 1, 1);
+            for i in 0..365 {
+                let d = start + Duration::days(i);
+                let noon = to_utc(d.and_hms_opt(12, 0, 0).unwrap());
+                let moon_new = moon_component(weather::days_to_nearest_syzygy(noon));
+                let moon_old = old_moon(noon);
+
+                let (op, ow, np, nw, tide) = match si {
+                    0 => (0, 0, 0.0, 0.5, 0.0),
+                    2 => (-1, -1, -1.0, -1.5, -1.0),
+                    _ => {
+                        let p_new = [1.5, 0.5, 0.0, -1.0][(i % 4) as usize];
+                        let p_old = [1, 1, 0, -1][(i % 4) as usize];
+                        let w_new = [0.5, 0.0, -1.5][((i / 3) % 3) as usize];
+                        let w_old = [0, 0, -1][((i / 3) % 3) as usize];
+                        let t_new = [1.0, 0.0, -1.0][((i / 5) % 3) as usize];
+                        (p_old, w_old, p_new, w_new, t_new)
+                    }
+                };
+                let old_star = (moon_old + op + ow).clamp(1, 5);
+                let new_star = star_rating(moon_new, np, nw, tide);
+                old_hist[old_star as usize] += 1;
+                new_hist[new_star as usize] += 1;
+            }
+            let pct = |h: [usize; 6]| {
+                (1..=5)
+                    .map(|s| format!("{}★ {:>3} ({:>2}%)", s, h[s], h[s] * 100 / 365))
+                    .collect::<Vec<_>>()
+                    .join("   ")
+            };
+            eprintln!("\n=== {name} ===");
+            eprintln!("  old: {}", pct(old_hist));
+            eprintln!("  new: {}", pct(new_hist));
+        }
     }
 
     /// The moon's distance stays inside its real perigee/apogee envelope, a

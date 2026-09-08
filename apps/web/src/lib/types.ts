@@ -389,13 +389,28 @@ export interface SolunarPeriod {
   end: string;
 }
 
+export type TideStrength = 'strong' | 'average' | 'weak';
+
+/** Per-factor breakdown of the star score. `pressure` is present for today
+ * only — the forecast feed carries no barometric data for future days. */
+export interface FishingFactors {
+  /** 0–3, continuous: 3 on the day of new/full, 0 at the quarters. */
+  moon: number;
+  wind: number;
+  tide: number;
+  pressure?: number;
+}
+
 export interface FishingDay {
   date: string;
-  /** 1–5. Moon phase baseline, nudged by today's barometric trend and wind. */
+  /** 1–5: `1 + moon(0–3) + pressure + wind + tide`, rounded and clamped. */
   stars: number;
   rating_label: 'Poor' | 'Fair' | 'Good' | 'Excellent';
   moon_phase: string;
   moon_emoji: string;
+  /** Day's predicted tidal range vs the station's Great Diurnal Range. */
+  tide_strength: TideStrength;
+  factors: FishingFactors;
   /** ~2 h, bracketing the moon's upper and lower transit. */
   major_periods: SolunarPeriod[];
   /** ~1 h, bracketing moonrise and moonset. */
