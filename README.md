@@ -93,6 +93,7 @@ See [`.env.example`](.env.example) for the annotated list. The ones that matter:
 | `RESEND_API_KEY` | prod | Unset ⇒ emails are logged, not sent |
 | `EMAIL_FROM_ADDRESS` | prod | Must be a Resend-verified domain |
 | `FRONTEND_URL` | prod | CORS origin + links inside emails |
+| `LEGACY_FRONTEND_URL` | no | Extra CORS origin, for a frontend URL being moved away from |
 | `API_BASE_URL` | **prod** | Where approve/deny buttons point — must be reachable from the owner's inbox |
 | `OWNER_EMAIL` | no | Bootstrap fallback only. Approval mail goes to every user flagged `is_owner` (admin panel → Users); this is used only when none is |
 | `ADMIN_EMAIL` | no | Informational copy |

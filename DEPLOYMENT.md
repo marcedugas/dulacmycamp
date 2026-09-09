@@ -109,6 +109,7 @@ Set on **dulacmycamp-api**:
 | `JWT_SECRET` | 32 random bytes, generated at setup |
 | `API_BASE_URL` | the API's own public URL |
 | `FRONTEND_URL` | the web service's public URL |
+| `LEGACY_FRONTEND_URL` | `https://dulacmycamp-web-production.up.railway.app` — keeps the pre-cutover origin working through CORS; unset it to retire that address |
 | `OWNER_EMAIL` | fallback only — see below |
 | `ADMIN_EMAIL` | `marc@recoresystems.net` |
 | `CAPACITY_ADULTS` | `10` |

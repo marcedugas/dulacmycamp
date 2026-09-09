@@ -59,6 +59,10 @@ pub struct Config {
     pub resend_api_key: Option<String>,
     pub email_from: String,
     pub frontend_url: String,
+    /// A previous public origin of the frontend, still allowed through CORS
+    /// while links built from it are in circulation. Unset once the old
+    /// address is genuinely retired — no code change needed to drop it.
+    pub legacy_frontend_url: Option<String>,
     /// Public origin of this API. Used to build the approve/deny links that
     /// go into the owner's email, so it must be reachable from their inbox.
     pub api_base_url: String,
@@ -97,6 +101,7 @@ impl Config {
             email_from: opt("EMAIL_FROM_ADDRESS")
                 .unwrap_or_else(|| "Dulac My Camp <no-reply@dulacmycamp.com>".into()),
             frontend_url: opt("FRONTEND_URL").unwrap_or_else(|| "http://localhost:5173".into()),
+            legacy_frontend_url: opt("LEGACY_FRONTEND_URL"),
             api_base_url: opt("API_BASE_URL").unwrap_or_else(|| "http://localhost:8080".into()),
             owner_email: opt("OWNER_EMAIL"),
             admin_email: opt("ADMIN_EMAIL"),
@@ -338,16 +343,37 @@ pub fn router(state: Shared) -> Router {
         .with_state(state)
 }
 
-fn cors_layer(cfg: &Config) -> CorsLayer {
+/// The browser origins allowed to call this API: the two local dev servers,
+/// the live frontend, and — while a retired address still has links pointing
+/// at it — whatever `LEGACY_FRONTEND_URL` names.
+fn allowed_origins(frontend_url: &str, legacy_frontend_url: Option<&str>) -> Vec<HeaderValue> {
     let mut origins: Vec<HeaderValue> = ["http://localhost:5173", "http://127.0.0.1:5173"]
         .iter()
         .filter_map(|o| o.parse().ok())
         .collect();
-    if let Ok(v) = cfg.frontend_url.trim_end_matches('/').parse() {
-        origins.push(v);
+    // A blank or unparseable value is skipped rather than pushed: an empty
+    // entry matches no origin and would quietly look like it was configured.
+    for url in [Some(frontend_url), legacy_frontend_url]
+        .into_iter()
+        .flatten()
+    {
+        let url = url.trim().trim_end_matches('/');
+        if url.is_empty() {
+            continue;
+        }
+        if let Ok(v) = url.parse() {
+            origins.push(v);
+        }
     }
+    origins
+}
+
+fn cors_layer(cfg: &Config) -> CorsLayer {
     CorsLayer::new()
-        .allow_origin(origins)
+        .allow_origin(allowed_origins(
+            &cfg.frontend_url,
+            cfg.legacy_frontend_url.as_deref(),
+        ))
         .allow_methods([
             Method::GET,
             Method::POST,
@@ -438,3 +464,60 @@ impl IntoResponse for AppError {
 }
 
 pub type ApiResult<T> = Result<T, AppError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn origins(frontend: &str, legacy: Option<&str>) -> Vec<String> {
+        allowed_origins(frontend, legacy)
+            .iter()
+            .map(|o| o.to_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn the_frontend_joins_the_dev_servers_in_the_allow_list() {
+        let list = origins("https://www.example.com", None);
+        assert_eq!(
+            list,
+            [
+                "http://localhost:5173",
+                "http://127.0.0.1:5173",
+                "https://www.example.com",
+            ]
+        );
+    }
+
+    /// The whole point of the legacy slot: the old address keeps working
+    /// without displacing the current one.
+    #[test]
+    fn a_legacy_origin_is_added_alongside_the_frontend() {
+        let list = origins("https://www.example.com", Some("https://old.example.net"));
+        assert!(list.contains(&"https://www.example.com".to_owned()));
+        assert!(list.contains(&"https://old.example.net".to_owned()));
+    }
+
+    /// An unset legacy URL must leave the list exactly as it was — an extra
+    /// empty entry would match nothing and read like it was configured.
+    #[test]
+    fn an_unset_legacy_origin_adds_nothing() {
+        assert_eq!(
+            origins("https://www.example.com", None),
+            origins("https://www.example.com", Some("")),
+        );
+        assert_eq!(
+            origins("https://www.example.com", None),
+            origins("https://www.example.com", Some("   ")),
+        );
+    }
+
+    /// Origins are compared verbatim, so a configured trailing slash would
+    /// otherwise never match the `Origin` header a browser sends.
+    #[test]
+    fn trailing_slashes_are_trimmed_from_both_urls() {
+        let list = origins("https://www.example.com/", Some("https://old.example.net/"));
+        assert!(list.contains(&"https://www.example.com".to_owned()));
+        assert!(list.contains(&"https://old.example.net".to_owned()));
+    }
+}
