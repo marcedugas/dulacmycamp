@@ -27,6 +27,10 @@ pub struct User {
     /// flagged; all of them get it.
     pub is_owner: bool,
     pub avatar_url: Option<String>,
+    /// Whether an admin password is set — the boolean only, never the hash.
+    /// Computed in SQL by `USER_COLUMNS` so `password_hash` itself is not in
+    /// any query this struct is read from, and so cannot be serialised out.
+    pub has_password: bool,
     pub last_login_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -58,9 +62,14 @@ impl User {
 }
 
 /// Columns shared by every `users` read, so row shapes never drift.
+///
+/// `password_hash` is deliberately absent: only its presence is exposed, as
+/// `has_password`. The one place the hash itself is read is
+/// [`find_with_password`], which the password login calls and nothing else.
 pub const USER_COLUMNS: &str = "id, email, full_name, phone, relationship, boat_info, notes, \
-                                role, is_owner, avatar_url, last_login_at, created_at, \
-                                updated_at";
+                                role, is_owner, avatar_url, \
+                                (password_hash IS NOT NULL) AS has_password, \
+                                last_login_at, created_at, updated_at";
 
 pub async fn find_by_id(db: &sqlx::PgPool, id: Uuid) -> Result<Option<User>, sqlx::Error> {
     sqlx::query_as::<_, User>(&format!("SELECT {USER_COLUMNS} FROM users WHERE id = $1"))
@@ -76,6 +85,40 @@ pub async fn find_by_email(db: &sqlx::PgPool, email: &str) -> Result<Option<User
     .bind(email)
     .fetch_optional(db)
     .await
+}
+
+/// A user together with their stored password hash — the only query that
+/// reads `password_hash` at all.
+///
+/// Kept separate from [`find_by_email`] so the hash never rides along on the
+/// row shape the rest of the app passes around and serialises.
+#[derive(FromRow)]
+pub struct UserWithHash {
+    #[sqlx(flatten)]
+    pub user: User,
+    pub password_hash: Option<String>,
+}
+
+pub async fn find_with_password(
+    db: &sqlx::PgPool,
+    email: &str,
+) -> Result<Option<UserWithHash>, sqlx::Error> {
+    sqlx::query_as::<_, UserWithHash>(&format!(
+        "SELECT {USER_COLUMNS}, password_hash FROM users WHERE lower(email) = lower($1)"
+    ))
+    .bind(email)
+    .fetch_optional(db)
+    .await
+}
+
+/// Stores (or replaces) an admin's password hash.
+pub async fn set_password_hash(db: &sqlx::PgPool, id: Uuid, hash: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE users SET password_hash = $2 WHERE id = $1")
+        .bind(id)
+        .bind(hash)
+        .execute(db)
+        .await
+        .map(|_| ())
 }
 
 /// The single admin used as the fallback recipient for guest messages and
@@ -182,7 +225,9 @@ pub async fn list_all(
 ) -> ApiResult<Json<Vec<UserWithStats>>> {
     let rows = sqlx::query_as::<_, UserWithStats>(
         "SELECT u.id, u.email, u.full_name, u.phone, u.relationship, u.boat_info, u.notes,
-                u.role, u.is_owner, u.avatar_url, u.last_login_at, u.created_at, u.updated_at,
+                u.role, u.is_owner, u.avatar_url,
+                (u.password_hash IS NOT NULL) AS has_password,
+                u.last_login_at, u.created_at, u.updated_at,
                 count(b.id) AS booking_count
          FROM users u
          LEFT JOIN bookings b ON b.user_id = u.id
@@ -218,8 +263,14 @@ pub async fn update_role(
         ));
     }
 
+    // Dropping to guest drops any password with it. Password login re-checks
+    // the role on every attempt, so a leftover hash would already be inert —
+    // but a credential nobody can use is a credential worth not keeping.
     let updated = sqlx::query_as::<_, User>(&format!(
-        "UPDATE users SET role = $2 WHERE id = $1 RETURNING {USER_COLUMNS}"
+        "UPDATE users
+         SET role = $2,
+             password_hash = CASE WHEN $2 = 'admin' THEN password_hash ELSE NULL END
+         WHERE id = $1 RETURNING {USER_COLUMNS}"
     ))
     .bind(id)
     .bind(&body.role)

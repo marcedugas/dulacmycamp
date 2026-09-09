@@ -1,0 +1,15 @@
+-- Optional password login for admin accounts.
+--
+-- OTP stays the way in for everyone; this is a convenience for the handful of
+-- admins who sign in often enough that a code round-trip per session grates.
+-- Nothing here replaces the OTP path — an admin with a password set can still
+-- use either.
+--
+-- NULL means "no password set", which is the state every account starts in
+-- and the state every guest stays in. The column is deliberately unconstrained
+-- at the schema level: "only admins may have one" is a rule about a role that
+-- can change at any time from the admin panel, so it lives in the application
+-- (see `auth::set_password`), which is also where a demoted admin's hash gets
+-- cleared. A stale hash on a demoted account would be inert regardless —
+-- `auth::login_password` re-checks the role on every attempt.
+ALTER TABLE users ADD COLUMN password_hash text;

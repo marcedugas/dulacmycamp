@@ -131,6 +131,24 @@ pub fn otp_email(code: &str, ttl_minutes: i64) -> Email {
     (subject, layout("Sign in to the camp", &body, ""), text)
 }
 
+/// Sent to an admin whenever their password is set or changed.
+///
+/// Not a confirmation — the change is already made by the time this goes out.
+/// It exists so that a password set by someone who got hold of a session lands
+/// in the real owner's inbox, which is the one place they would notice.
+pub fn password_changed(app_url: &str) -> Email {
+    let subject = "Your Dulac My Camp password was changed".to_string();
+    let body = format!(
+        r#"<p style="margin:0 0 18px;">The password on your Dulac My Camp admin account was just set or changed.</p>
+<p style="margin:0 0 18px;">If that was you, there's nothing to do.</p>
+<p style="margin:0;color:#6b6255;font-size:14px;">If it wasn't, sign in with an emailed code at <a href="{app_url}/login" style="color:{GREEN};">{app_url}/login</a> and set a new password straight away — signing in with a code always works, whatever the password is.</p>"#
+    );
+    let text = format!(
+        "Your Dulac My Camp password was changed\n\nThe password on your admin account was just set or changed.\n\nIf that wasn't you, sign in with an emailed code at {app_url}/login and set a new one. Code sign-in always works, whatever the password is.\n\n(c) 2026 Dulac My Camp\n"
+    );
+    (subject, layout("Password changed", &body, ""), text)
+}
+
 /// Sent to the camp owner. This is the only email with action buttons.
 pub fn booking_request_to_owner(
     b: &Booking,

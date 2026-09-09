@@ -15,9 +15,17 @@ export interface User {
   /** Receives the booking approve/deny email. Any number of users may be owners. */
   is_owner: boolean;
   avatar_url: string | null;
+  /** Whether an admin password is set. Never the hash itself — the API only
+   * ever reports its presence. Always false for guests. */
+  has_password: boolean;
   last_login_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** The API's plain `{ message }` acknowledgement. */
+export interface MessageResponse {
+  message: string;
 }
 
 export interface UserWithStats extends User {

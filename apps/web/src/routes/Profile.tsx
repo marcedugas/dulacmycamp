@@ -1,9 +1,95 @@
 import { useState } from 'react';
 import { toast } from 'sonner';
+import { KeyRound } from 'lucide-react';
 import { Button, Card, Field, Input, PageHeader, Textarea } from '../components/ui';
 import { api, ApiError } from '../lib/api';
 import { useAuth } from '../lib/auth';
-import type { User } from '../lib/types';
+import type { MessageResponse, User } from '../lib/types';
+
+/** Mirrors `password::MIN_PASSWORD_LEN`; the server is still the authority. */
+const MIN_PASSWORD_LEN = 10;
+
+/**
+ * Optional password sign-in, for admins only — rendered nowhere else, and
+ * refused by the server for anyone else regardless.
+ *
+ * This never removes the emailed-code route: an admin who sets a password
+ * keeps both, which is also what makes a forgotten password a non-event.
+ */
+function PasswordSection({ hasPassword, onSaved }: { hasPassword: boolean; onSaved: () => Promise<void> }) {
+  const [password, setPassword] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const tooShort = password.length > 0 && password.length < MIN_PASSWORD_LEN;
+  const mismatch = confirm.length > 0 && confirm !== password;
+  const valid = password.length >= MIN_PASSWORD_LEN && confirm === password;
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      const res = await api<MessageResponse>('/auth/set-password', {
+        method: 'POST',
+        body: { password },
+      });
+      setPassword('');
+      setConfirm('');
+      await onSaved();
+      toast.success(res.message);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'Could not save that password.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card className="mt-6">
+      <div className="mb-1 flex items-center gap-2">
+        <KeyRound size={16} className="text-muted" />
+        <h2 className="font-display text-lg font-bold text-charcoal">
+          {hasPassword ? 'Change password' : 'Set a password'}
+        </h2>
+      </div>
+      <p className="mb-4 text-sm text-muted">
+        {hasPassword
+          ? 'You can sign in with this password instead of waiting for a code. Emailed codes keep working either way.'
+          : `Admin accounts can sign in with a password instead of an emailed code. Setting one doesn't turn codes off — you'll still be able to use them.`}
+      </p>
+
+      <form onSubmit={submit} className="space-y-4">
+        <Field label="New password" hint={`At least ${MIN_PASSWORD_LEN} characters. A short phrase works well.`}>
+          <Input
+            type="password"
+            autoComplete="new-password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+        </Field>
+        <Field label="Confirm new password">
+          <Input
+            type="password"
+            autoComplete="new-password"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+          />
+        </Field>
+
+        {tooShort && (
+          <p className="text-sm text-clay">
+            That&apos;s {password.length} characters — {MIN_PASSWORD_LEN} is the minimum.
+          </p>
+        )}
+        {mismatch && <p className="text-sm text-clay">Those two don&apos;t match.</p>}
+
+        <Button type="submit" disabled={busy || !valid}>
+          {busy ? 'Saving…' : hasPassword ? 'Change password' : 'Set password'}
+        </Button>
+      </form>
+    </Card>
+  );
+}
 
 export default function Profile() {
   const { user, refresh } = useAuth();
@@ -68,6 +154,10 @@ export default function Profile() {
           </Button>
         </form>
       </Card>
+
+      {user?.role === 'admin' && (
+        <PasswordSection hasPassword={user.has_password} onSaved={refresh} />
+      )}
     </div>
   );
 }

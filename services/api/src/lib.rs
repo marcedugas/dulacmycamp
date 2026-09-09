@@ -17,6 +17,7 @@ pub mod holidays;
 pub mod journal;
 pub mod my_stay;
 pub mod notifications;
+pub mod password;
 pub mod rate_limit;
 pub mod site_content;
 pub mod solunar;
@@ -193,6 +194,10 @@ pub fn router(state: Shared) -> Router {
         // ── auth ──
         .route("/auth/request-otp", post(auth::request_otp))
         .route("/auth/verify-otp", post(auth::verify_otp))
+        // Optional password sign-in, admins only — additive to the OTP flow
+        // above, which stays the way in for everyone. See `auth`.
+        .route("/auth/login-password", post(auth::login_password))
+        .route("/auth/set-password", post(auth::set_password))
         .route("/auth/me", get(auth::me))
         // ── bookings ──
         // The two token routes sit above `/bookings/{id}` on purpose: they are

@@ -1,12 +1,24 @@
-//! A small fixed-window rate limiter for the one public endpoint that spends
-//! money: `POST /auth/request-otp` sends an email on every accepted call.
+//! A small fixed-window rate limiter for the public endpoints worth throttling:
+//!
+//! * `POST /auth/request-otp` — sends an email on every accepted call, so this
+//!   is a spend guard.
+//! * `POST /auth/login-password` — the admin password login, where the point is
+//!   to make guessing expensive.
 //!
 //! Deliberately in-process rather than Redis-backed. The camp runs a single
 //! API replica, and a family booking app does not justify another service to
 //! operate. The trade-off is explicit: **limits reset on deploy and are not
 //! shared between replicas**, so if this service is ever scaled past one
-//! instance the ceiling multiplies by the replica count. That is acceptable
-//! for a cost guard; it would not be for anything security-critical.
+//! instance the ceiling multiplies by the replica count, and a deploy hands
+//! everyone a fresh budget.
+//!
+//! For the OTP spend guard that is plainly fine. For the password endpoint it
+//! is a real, if modest, weakness — a determined attacker who can time deploys
+//! gets extra attempts. It is accepted here because the exposure is small: the
+//! endpoint only ever answers for admin accounts, of which there are a handful,
+//! all of which also hold a `MIN_PASSWORD_LEN`-plus secret. If this service is
+//! ever replicated, the password limiter is the piece that has to move to
+//! shared storage first.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -67,13 +79,18 @@ impl RateLimiter {
     }
 }
 
-/// Limits for the OTP endpoint.
+/// Limits for the unauthenticated auth endpoints.
 pub struct RateLimits {
     /// Per address. Stops one inbox being flooded with codes.
     pub otp_per_email: RateLimiter,
     /// Per client IP. This is the one that caps spend, since an attacker
     /// cycling through addresses defeats the per-email limit.
     pub otp_per_ip: RateLimiter,
+    /// Password attempts per client IP.
+    pub password_per_ip: RateLimiter,
+    /// Password attempts per address, so one account cannot be ground down
+    /// from a rotating pool of addresses.
+    pub password_per_email: RateLimiter,
 }
 
 impl Default for RateLimits {
@@ -85,6 +102,23 @@ impl Default for RateLimits {
             // A whole family can share one NAT address at the camp, so allow
             // a small burst rather than one per minute per household.
             otp_per_ip: RateLimiter::new(5, Duration::from_secs(600)),
+
+            // Tighter than the OTP ceiling above — same attempt count over a
+            // window half again as long. Guessing a password is a different
+            // threat from flooding an inbox: there is no cost ceiling to
+            // protect, only a secret, so the budget should be mean.
+            //
+            // Every attempt counts, not only the failures, which is the
+            // stricter reading: an attacker gets five tries per window whether
+            // or not any of them land. The cost is that an admin signing in
+            // five times in fifteen minutes is asked to wait — and OTP is
+            // still right there, so they are inconvenienced, never locked out.
+            password_per_ip: RateLimiter::new(5, Duration::from_secs(900)),
+            // Same budget keyed by address. This one is deliberately
+            // exhaustible by a third party: someone else burning an admin's
+            // password budget costs that admin nothing but the password path,
+            // which OTP already backs up.
+            password_per_email: RateLimiter::new(5, Duration::from_secs(900)),
         }
     }
 }
