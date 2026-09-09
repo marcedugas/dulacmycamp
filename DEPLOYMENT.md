@@ -4,9 +4,15 @@ Live as of 2026-09-04.
 
 | | URL |
 |---|---|
-| Web | https://dulacmycamp-web-production.up.railway.app |
-| API | https://dulacmycamp-api-production.up.railway.app |
+| Web | https://www.dulacmycamp.com |
+| API | https://api.dulacmycamp.com |
 | Project | https://railway.com/project/089814ba-313b-4eda-a546-f9c58566a190 |
+
+Custom domains since 2026-09-09. The Railway-provided
+`dulacmycamp-{web,api}-production.up.railway.app` addresses are deliberately
+left active: approve/deny links in already-sent owner emails were built from
+the old `API_BASE_URL` and stay valid for 48 hours, so removing those domains
+would break links still sitting in an inbox.
 
 Three services in the `production` environment: `dulacmycamp-api`,
 `dulacmycamp-web`, and a `Postgres` plugin. Both app services deploy from
