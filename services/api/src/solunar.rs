@@ -7,10 +7,11 @@
 //! 1. **When** — major and minor bite windows, pure astronomy, weather plays no
 //!    part. Majors (~2 h) bracket the moon's upper and lower transit; minors
 //!    (~1 h) bracket moonrise and moonset.
-//! 2. **How good** — a 1–5 star rating: `1 + moon(0–3) + pressure + wind +
-//!    tide`, rounded to a whole star. The moon term is a continuous gradient
-//!    (peak on the day of new/full, 0 at the quarters); the weather/tide
-//!    modifiers are wide enough to genuinely move it, not just nudge.
+//! 2. **How good** — a 1–5 star rating:
+//!    `1 + moon(0–4) + clamp(pressure + wind + tide, −2.5, +1.0)`, rounded to
+//!    a whole star. The moon term (a continuous gradient, peak on the day of
+//!    new/full, spent six days out) owns the whole scale and sets the shape of
+//!    the week; weather and tide adjust within a bounded envelope.
 //!
 //! The hard part is the moon's actual position. The lunar widget's phase maths
 //! (mean synodic month) says nothing about *where* the moon is, which is what
@@ -381,22 +382,51 @@ fn moon_events(date: NaiveDate) -> MoonEvents {
 
 // ─────────────────────────── star rating ───────────────────────────
 //
-// `1 + moon(0–3) + pressure + wind + tide`, rounded to a whole star, clamped
-// 1–5. The moon term is a continuous gradient (peak on the day of new/full,
-// tapering to 0 at the quarters) rather than the old flat 4/5/3 buckets, which
-// defaulted ~27 of every ~29.5 days to 4 or 5 and left weather barely able to
-// move the score. The weather modifiers are wide enough to actually swing it.
+// `1 + moon(0–4) + clamp(pressure + wind + tide, −2.5, +1.0)`, rounded to a
+// whole star, clamped 1–5.
+//
+// The **moon term owns the scale and sets the shape of the week** — a
+// continuous gradient peaking on the day of new/full and spent six days out.
+// Weather and tide adjust within it, but their *sum* is bounded so they can
+// sink a day (a hard blow really does kill fishing) without reordering the
+// week around a lucky Tuesday.
+//
+// Three earlier cuts each got this wrong in a way worth remembering:
+//
+//  * Summing four unbounded terms let a favourable day stack +2.0 of modifiers
+//    — more than the moon term's whole spread across a week — so the day of a
+//    new moon could come back *below* a shoulder day. Hence the clamp.
+//  * Ramping the moon term to zero at the *quarter* (~7.4 days) moved it only
+//    ~0.47 stars a day, less than a single modifier, and capped it at 3.5 so
+//    it could never round to 5 on its own. A week around a new moon came back
+//    flat. Hence `MOON_WEIGHT` 4.0 over `MOON_REACH` 6 days: ~0.67 stars a
+//    day, and a syzygy that reaches the top of the scale unaided.
+//  * A *penalty* for a below-average tidal range fought the moon directly.
+//    Cocodrie is diurnal: its daily range swings between ~0.3× and ~1.6× of the
+//    station datum on the moon's *declination* (27.3-day tropical month), which
+//    drifts against the 29.5-day phase cycle. Roughly one syzygy in five lands
+//    on a slack range — September 2026's new moon does — and the penalty then
+//    cancels exactly the days the moon peaked. So tide is now bonus-only: a
+//    strong flow lifts a day, a slack one merely fails to.
 
-/// Days from a syzygy out to the adjacent quarter — the moon term's zero point.
-fn quarter_days() -> f64 {
-    weather::SYNODIC_MONTH / 4.0
-}
+/// How much of the 1–5 range the moon alone commands — all of it. A new or full
+/// moon in neutral weather is a 5 without help from anything else.
+const MOON_WEIGHT: f64 = 4.0;
+/// Days either side of a syzygy over which the moon term is spent. Shorter than
+/// the quarter (~7.4 days) on purpose: the term has to move faster than the
+/// modifiers for the moon to set the week's shape rather than merely tint it.
+const MOON_REACH: f64 = 6.0;
+/// Bounds on the summed weather/tide adjustment. Asymmetric on purpose: rough
+/// weather can pull a day well down, favourable weather lifts it at most one
+/// star (the moon has to be there for a 5).
+const WEATHER_MIN: f64 = -2.5;
+const WEATHER_MAX: f64 = 1.0;
 
-/// Moon contribution, 0–3 points: 3 at an exact new or full moon, ramping
-/// linearly to 0 at the first/last quarter (~7.4 days away). Keyed on the same
-/// true distance-to-syzygy the phase label now uses.
+/// Moon contribution, 0–`MOON_WEIGHT` points: the full weight at an exact new or
+/// full moon, ramping linearly to 0 `MOON_REACH` days away. Keyed on the true
+/// distance-to-syzygy the phase label uses.
 fn moon_component(days_to_syzygy: f64) -> f64 {
-    (3.0 * (1.0 - days_to_syzygy / quarter_days())).clamp(0.0, 3.0)
+    (MOON_WEIGHT * (1.0 - days_to_syzygy / MOON_REACH)).clamp(0.0, MOON_WEIGHT)
 }
 
 /// Barometric modifier. A glass falling ahead of a front is the classic bite
@@ -421,20 +451,30 @@ fn wind_modifier(mph: Option<f64>) -> f64 {
 }
 
 /// Tide-strength modifier — more water moving means more bait moving.
+/// Bonus-only: a strong flow is an unambiguous positive, a slack range is the
+/// absence of that bonus, not a fault. A slack range is a prediction about the
+/// moon's declination, not about the fishing, and penalising it cancelled the
+/// moon term on roughly one syzygy in five (see the note above). The label is
+/// still surfaced in the payload either way.
 fn tide_modifier(strength: &str) -> f64 {
     match strength {
         "strong" => 1.0,
-        "weak" => -1.0,
         _ => 0.0,
     }
 }
 
 /// `"strong" | "average" | "weak"` from a day's predicted range against the
 /// station's Great Diurnal Range. Neutral when either figure is missing.
+///
+/// The thresholds are the empirical quartiles of `day_range / GT` at Cocodrie,
+/// not round numbers: across 2026 that ratio runs p25 0.75, median 1.14, p75
+/// 1.39. GT is a decadal *average diurnal* range, so it sits below the median
+/// of a day's max-minus-min — an earlier `> 1.15` cut-off called 47% of the
+/// year "strong" and handed out a full bonus most days it wasn't earned.
 fn tide_strength(day_range: Option<f64>, baseline: Option<f64>) -> &'static str {
     match (day_range, baseline) {
         (Some(r), Some(b)) if b > 0.0 => match r / b {
-            x if x > 1.15 => "strong",
+            x if x > 1.40 => "strong",
             x if x < 0.75 => "weak",
             _ => "average",
         },
@@ -467,8 +507,14 @@ fn rating_label(stars: i64) -> &'static str {
     }
 }
 
+/// Clamped weather/tide adjustment — the sum, bounded so it shapes within the
+/// moon's envelope rather than overriding it.
+fn weather_adjustment(pressure: f64, wind: f64, tide: f64) -> f64 {
+    (pressure + wind + tide).clamp(WEATHER_MIN, WEATHER_MAX)
+}
+
 fn star_rating(moon: f64, pressure: f64, wind: f64, tide: f64) -> i64 {
-    (1.0 + moon + pressure + wind + tide)
+    (1.0 + moon + weather_adjustment(pressure, wind, tide))
         .round()
         .clamp(1.0, 5.0) as i64
 }
@@ -557,6 +603,8 @@ async fn build_forecast(state: &Shared) -> anyhow::Result<Value> {
             "moon": round2(moon),
             "wind": wind_mod,
             "tide": tide_mod,
+            // The bounded sum that actually reaches the score.
+            "weather_adjustment": round2(weather_adjustment(pressure_mod, wind_mod, tide_mod)),
         });
         if offset == 0 {
             factors["pressure"] = json!(pressure_mod);
@@ -897,17 +945,21 @@ mod tests {
 
     #[test]
     fn moon_component_is_a_continuous_gradient() {
-        let q = quarter_days();
-        // 3 at the syzygy, 0 at the quarter, linear between.
-        assert!((moon_component(0.0) - 3.0).abs() < 1e-9);
-        assert!((moon_component(q) - 0.0).abs() < 1e-9);
-        assert!((moon_component(q / 2.0) - 1.5).abs() < 1e-9);
+        // Full weight at the syzygy, 0 at the reach, linear between.
+        assert!((moon_component(0.0) - MOON_WEIGHT).abs() < 1e-9);
+        assert!((moon_component(MOON_REACH) - 0.0).abs() < 1e-9);
+        assert!((moon_component(MOON_REACH / 2.0) - MOON_WEIGHT / 2.0).abs() < 1e-9);
         // The day *of* the new moon must beat the day after — the whole point
         // of dropping the flat buckets.
         assert!(moon_component(0.3) > moon_component(1.3));
         assert!(moon_component(1.3) > moon_component(2.3));
-        // Past the quarter it stays pinned at 0, never negative.
-        assert_eq!(moon_component(q + 3.0), 0.0);
+        // Past the reach it stays pinned at 0, never negative.
+        assert_eq!(moon_component(MOON_REACH + 3.0), 0.0);
+        // The moon alone has to be able to make a 5, and has to move faster
+        // than any single modifier can — otherwise weather sets the shape.
+        assert_eq!(star_rating(moon_component(0.0), 0.0, 0.0, 0.0), 5);
+        let per_day = moon_component(0.0) - moon_component(1.0);
+        assert!(per_day > 0.5, "moon term moves only {per_day} stars a day");
     }
 
     #[test]
@@ -923,25 +975,45 @@ mod tests {
         assert_eq!(wind_modifier(None), 0.0);
         assert_eq!(wind_modifier(Some(18.0)), -1.5);
         assert_eq!(wind_modifier(Some(30.0)), -2.5);
+
+        // Tide is bonus-only: a strong flow lifts, a slack one just doesn't.
+        assert_eq!(tide_modifier("strong"), 1.0);
+        assert_eq!(tide_modifier("weak"), 0.0);
+        assert_eq!(tide_modifier("average"), 0.0);
+    }
+
+    #[test]
+    fn weather_adjustment_is_bounded() {
+        // The sum can't lift a day more than one star…
+        assert_eq!(weather_adjustment(1.5, 0.5, 1.0), WEATHER_MAX);
+        // …but a genuinely rough day can pull it well down.
+        assert_eq!(weather_adjustment(-1.0, -2.5, 0.0), WEATHER_MIN);
+        assert_eq!(weather_adjustment(0.0, 0.0, 0.0), 0.0);
     }
 
     #[test]
     fn star_rating_spans_the_full_range_and_clamps() {
-        // Quarter moon (0), rough weather: 1 + 0 - 1 - 2.5 - 1 = clamps to 1.
-        assert_eq!(star_rating(0.0, -1.0, -2.5, -1.0), 1);
-        // Quarter, neutral weather: 1 + 0 = 1 — a genuine floor day.
+        // Beyond the reach (0), rough weather: adjustment floors at -2.5 → 1.
+        assert_eq!(star_rating(0.0, -1.0, -2.5, 0.0), 1);
+        // Beyond the reach, neutral: 1 + 0 = 1 — a genuine floor day.
         assert_eq!(star_rating(0.0, 0.0, 0.0, 0.0), 1);
-        // Mid-gradient (1.5), neutral: 1 + 1.5 = 2.5 → rounds to 3... check:
-        assert_eq!(star_rating(1.5, 0.0, 0.0, 0.0), 3);
-        // New moon (3), calm + strong tide: 1 + 3 + 0.5 + 1 = 5.5 → clamps to 5.
-        assert_eq!(star_rating(3.0, 0.0, 0.5, 1.0), 5);
-        // New moon, rising glass + wind + weak tide: 1 + 3 - 1 - 1.5 - 1 = 0.5 → 1.
-        assert_eq!(star_rating(3.0, -1.0, -1.5, -1.0), 1);
+        // Mid-gradient (2.0), neutral: 1 + 2.0 = 3.
+        assert_eq!(star_rating(2.0, 0.0, 0.0, 0.0), 3);
+        // Syzygy (4.0), neutral: the moon makes a 5 unaided.
+        assert_eq!(star_rating(4.0, 0.0, 0.0, 0.0), 5);
+        // Syzygy, a nasty front: 1 + 4 - 2.5 = 2.5 → 3. Bad weather still hurts,
+        // but a new moon doesn't bottom out.
+        assert_eq!(star_rating(4.0, -1.0, -1.5, 0.0), 3);
+        // Favourable weather on a weak moon can't reach the top: the adjustment
+        // caps at +1, so a day beyond ~2¼ days from a syzygy can never be a 5.
+        assert_eq!(star_rating(1.0, 1.5, 0.5, 1.0), 3); // 1 + 1.0 + 1.0 = 3, not 5
+        assert_eq!(star_rating(moon_component(2.5), 1.5, 0.5, 1.0), 4);
     }
 
     #[test]
     fn tide_strength_thresholds() {
-        assert_eq!(tide_strength(Some(1.30), Some(1.05)), "strong"); // ratio 1.24
+        assert_eq!(tide_strength(Some(1.60), Some(1.05)), "strong"); // ratio 1.52
+        assert_eq!(tide_strength(Some(1.30), Some(1.05)), "average"); // ratio 1.24
         assert_eq!(tide_strength(Some(1.05), Some(1.05)), "average");
         assert_eq!(tide_strength(Some(0.70), Some(1.05)), "weak"); // ratio 0.67
         // Missing either figure → neutral, never a crash.
@@ -966,32 +1038,104 @@ mod tests {
     /// weather — the whole reason tide was folded in.
     #[test]
     fn strong_tide_beats_weak_tide_at_equal_phase() {
-        let moon = moon_component(3.5); // mid-gradient, a shoulder day
+        let moon = moon_component(2.5); // a shoulder day
         let strong = star_rating(moon, 0.0, 0.0, tide_modifier("strong"));
         let weak = star_rating(moon, 0.0, 0.0, tide_modifier("weak"));
         assert!(strong > weak, "strong {strong} should beat weak {weak}");
-        assert_eq!(strong - weak, 2); // +1 vs -1
     }
 
-    /// Regression — September 2026 new moon, Cocodrie / America-Chicago.
-    /// USNO: 2026-09-11 03:27 UTC = 2026-09-10 22:27 local (Thursday). With the
-    /// true-phase distance and the continuous gradient, Thursday the 10th scores
-    /// at (or within a rounding step of) the moon-term ceiling, and clearly
-    /// above days 3+ away.
+    /// The moon term itself must be a correct bell around the true syzygy —
+    /// September 2026 new moon, Cocodrie / America-Chicago (USNO 2026-09-11
+    /// 03:27 UTC = 2026-09-10 22:27 local). Independent of the rating formula.
     #[test]
     fn sept_2026_new_moon_peak_is_a_real_gradient() {
         let moon = |day: u32| {
             let noon = to_utc(date(2026, 9, day).and_hms_opt(12, 0, 0).unwrap());
             moon_component(weather::days_to_nearest_syzygy(noon))
         };
-        // Thu 10 and Fri 11 straddle the true new moon (Sept 11 03:27 UTC), both
-        // within ~0.5 day of it, so both sit near the moon-term ceiling of 3.
-        assert!(moon(10) > 2.7, "Thu 10 moon term {}", moon(10));
-        assert!(moon(11) > 2.7, "Fri 11 moon term {}", moon(11));
+        // Thu 10 and Fri 11 straddle the true new moon, both within ~0.5 day, so
+        // both sit near the ceiling.
+        assert!(
+            moon(10) > MOON_WEIGHT - 0.6,
+            "Thu 10 moon term {}",
+            moon(10)
+        );
+        assert!(
+            moon(11) > MOON_WEIGHT - 0.6,
+            "Fri 11 moon term {}",
+            moon(11)
+        );
         // A real taper on either side — the days out score progressively lower.
         assert!(moon(11) > moon(9));
         assert!(moon(9) > moon(7));
         assert!(moon(13) < moon(11));
+    }
+
+    /// Pinned regression for the September 2026 shape inversion.
+    ///
+    /// The real feed values for 2026-09-08…14 at Cocodrie: NOAA 8762928 hi/lo
+    /// predictions (station GT = 1.05 ft), the LIX/46,57 daytime wind forecast,
+    /// and KHUM's barometer (glass down 0.7 mb over six hours on the 8th, so
+    /// today — and only today — carries a +0.5 pressure term). The true new moon
+    /// is 2026-09-10 22:28 local.
+    ///
+    /// Scored under the code as it stood, this week came back
+    /// `5, 3, 3, 3, 2, 2, 3`: Tuesday alone at the top on a +2.0 stack of
+    /// unbounded modifiers, and the new-moon days *below* it because their
+    /// slack tidal range drew a penalty. The week has to bell around the moon.
+    #[test]
+    fn sept_2026_week_bells_around_the_new_moon() {
+        /// Great Diurnal Range for NOAA 8762928, from the CO-OPS datums API.
+        const GT: f64 = 1.05;
+        /// `(day, highest high, lowest low, daytime wind mph, pressure modifier)`
+        const WEEK: &[(u32, f64, f64, f64, f64)] = &[
+            (8, 1.540, 0.176, 4.7, 0.5), // today: live obs, glass falling
+            (9, 1.448, 0.377, 15.0, 0.0),
+            (10, 1.308, 0.626, 5.0, 0.0),
+            (11, 1.164, 0.883, 10.0, 0.0),
+            (12, 1.011, 0.690, 5.0, 0.0),
+            (13, 1.169, 0.499, 10.0, 0.0),
+            (14, 1.330, 0.361, 5.0, 0.0),
+        ];
+
+        let stars: Vec<i64> = WEEK
+            .iter()
+            .map(|&(day, high, low, wind, pressure)| {
+                let noon = to_utc(date(2026, 9, day).and_hms_opt(12, 0, 0).unwrap());
+                let moon = moon_component(weather::days_to_nearest_syzygy(noon));
+                let tide = tide_modifier(tide_strength(Some(high - low), Some(GT)));
+                star_rating(moon, pressure, wind_modifier(Some(wind)), tide)
+            })
+            .collect();
+
+        //                     Tue Wed Thu Fri Sat Sun Mon
+        assert_eq!(stars, [4, 4, 5, 5, 4, 3, 3], "week shape");
+
+        // The invariants behind those numbers, stated as shape rather than
+        // values — this is what "tracks the moon" means and what broke before.
+        let (tue, week_peak) = (stars[0], *stars.iter().max().unwrap());
+        let peak_day = stars.iter().position(|s| *s == week_peak).unwrap();
+        assert!(
+            (2..=3).contains(&peak_day),
+            "the week must peak on Thu 10 / Fri 11, not day {peak_day}"
+        );
+        assert!(
+            tue < week_peak,
+            "Tue {tue} is 2.4 days out; it must not reach the peak {week_peak}"
+        );
+        // Wed 9 – Sat 12 is the "New Moon" window: every day in it outscores
+        // both shoulders, so the window never dips below what surrounds it.
+        let window_floor = stars[1..=4].iter().copied().min().unwrap();
+        assert!(
+            window_floor >= tue && window_floor >= stars[5] && window_floor >= stars[6],
+            "the new-moon window {:?} dips below its shoulders",
+            &stars[1..=4]
+        );
+        // A taper out of the window, and no day jumps more than one star.
+        assert!(stars[4] >= stars[5] && stars[5] >= stars[6], "{stars:?}");
+        for pair in stars.windows(2) {
+            assert!((pair[0] - pair[1]).abs() <= 1, "jump in {stars:?}");
+        }
     }
 
     #[test]
@@ -1011,9 +1155,13 @@ mod tests {
         assert_eq!(parse_wind_mph("5 to 20 mph"), Some(20.0));
     }
 
-    /// Old (bucket) vs new (gradient) star distribution across all of 2026,
-    /// under calm / typical / rough weather. Proof the rebalance widened the
-    /// effective range — the old formula puts almost nothing below 3.
+    /// Full-year star distribution, 2026 — the guard against both failure modes
+    /// this scoring has had: the original buckets that put ~90% of the year at
+    /// 4-5, and any rebalance that over-corrects into a wall of 1s. Run with
+    /// `--ignored --nocapture`.
+    ///
+    /// The "moon alone" row is the one that matters: it is the shape of the
+    /// week before any weather touches it.
     #[test]
     #[ignore = "diagnostic: full-year star distribution, old formula vs new"]
     fn print_star_distribution() {
@@ -1034,7 +1182,12 @@ mod tests {
             }
         };
 
-        let scenarios = ["calm/steady", "typical variability", "rough"];
+        let scenarios = [
+            "moon alone (neutral weather)",
+            "calm/steady",
+            "typical variability",
+            "rough",
+        ];
         for (si, name) in scenarios.iter().enumerate() {
             let mut old_hist = [0usize; 6];
             let mut new_hist = [0usize; 6];
@@ -1046,14 +1199,16 @@ mod tests {
                 let moon_old = old_moon(noon);
 
                 let (op, ow, np, nw, tide) = match si {
-                    0 => (0, 0, 0.0, 0.5, 0.0),
-                    2 => (-1, -1, -1.0, -1.5, -1.0),
+                    0 => (0, 0, 0.0, 0.0, 0.0),
+                    1 => (0, 0, 0.0, 0.5, tide_modifier("average")),
+                    3 => (-1, -1, -1.0, -1.5, tide_modifier("weak")),
                     _ => {
                         let p_new = [1.5, 0.5, 0.0, -1.0][(i % 4) as usize];
                         let p_old = [1, 1, 0, -1][(i % 4) as usize];
                         let w_new = [0.5, 0.0, -1.5][((i / 3) % 3) as usize];
                         let w_old = [0, 0, -1][((i / 3) % 3) as usize];
-                        let t_new = [1.0, 0.0, -1.0][((i / 5) % 3) as usize];
+                        // ~1 day in 4 clears the recalibrated "strong" bar.
+                        let t_new = tide_modifier(if i % 4 == 0 { "strong" } else { "average" });
                         (p_old, w_old, p_new, w_new, t_new)
                     }
                 };

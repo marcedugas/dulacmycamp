@@ -484,7 +484,10 @@ pub(crate) async fn tide_hilo(state: &Shared) -> Vec<Value> {
 
 // ─────────────────────────── lunar + solar ───────────────────────────
 
-/// Mean length of one lunation, in days.
+/// Mean length of one lunation, in days. Only the star-distribution diagnostic
+/// reads it now — the phase maths itself runs on Meeus' `phase_jde`, which
+/// carries its own (slightly different) mean lunation in `MEAN_LUNATION`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const SYNODIC_MONTH: f64 = 29.530_588_853;
 /// Meeus' *mean* new-moon epoch (Astronomical Algorithms 2nd ed., eq. 49.1,
 /// k = 0): JDE 2451550.09766 ≈ 2000-01-06 14:20 UTC — the mean instant, which

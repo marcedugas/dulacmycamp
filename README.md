@@ -145,18 +145,27 @@ the right calendar day year-round. The fishing rating's moon term keys on the
 same true distance-to-syzygy. Sunrise and sunset use the standard NOAA sunrise
 equation.
 
-**Fishing star rating.** `1 + moon(0–3) + pressure + wind + tide`, rounded to a
-whole star, clamped 1–5. The moon term is a continuous gradient — 3 on the day
-of new/full, tapering linearly to 0 at the quarters — so the day *of* a syzygy
-outscores the days flanking it (the old flat buckets defaulted ~27 of every
-29.5 days to 4–5 and left weather unable to move the needle). Pressure
-(falling-sharp +1.5 / falling +0.5 / rising −1, today only) and wind
-(calm +0.5 / >15 mph −1.5 / >25 mph −2.5) and **tide strength** all feed the
-same sum. Tide strength is the day's predicted range (highest high − lowest
-low) against the station's Great Diurnal Range: >1.15× → strong (+1),
-<0.75× → weak (−1). Unlike pressure, tide predictions are good weeks out, so
-this modifier applies to all seven days. A per-day `factors` object in the
-response breaks the score down (`pressure` present for today only).
+**Fishing star rating.** `1 + moon(0–4) + clamp(pressure + wind + tide, −2.5,
++1.0)`, rounded to a whole star, clamped 1–5. The **moon term owns the scale
+and sets the shape of the week** — a continuous gradient, full weight on the
+day of new/full and spent six days out, so a syzygy in neutral weather is a 5
+unaided and the term moves ~⅔ of a star a day, faster than any single modifier.
+Weather and tide adjust within that: a rough day (a front plus a hard blow) can
+pull the score well down, favourable weather lifts it at most one star. The
+asymmetry keeps the moon in charge of the ranking — a lucky-weather day more
+than ~2¼ days off a syzygy can't reach 5 however good the conditions.
+Pressure (falling-sharp +1.5 / falling +0.5 / rising −1, today only), wind
+(calm +0.5 / >15 mph −1.5 / >25 mph −2.5), tide (strong +1, otherwise 0). Tide
+strength is the day's predicted range (highest high − lowest low) against the
+station's Great Diurnal Range: >1.40× strong, <0.75× weak — the empirical p75
+and p25 of that ratio at Cocodrie, not round numbers. Tide is **bonus-only**:
+Cocodrie is a diurnal station, so its daily range swings on the moon's
+declination (27.3-day tropical month) rather than its phase, and about one
+syzygy in five lands on a slack range; penalising that cancelled exactly the
+days the moon peaked. Unlike pressure, tide predictions are good weeks out, so
+the term applies to all seven days. A per-day `factors` object breaks the score
+down (`pressure` for today only; `weather_adjustment` is the bounded sum that
+reached the score).
 
 The fishing forecast needs the moon's actual *position*, not just its phase, so
 it carries a truncated form of Jean Meeus' lunar series (*Astronomical
@@ -205,9 +214,12 @@ transition.
    table.** The addendum's baseline table (new/full 5, quarter 3, shoulder 4) defaulted
    ~27 of every ~29.5 days to 4–5 before any weather modifier, and modifiers
    only subtracted — the effective range was ~3–5, not 1–5. The rating is now a
-   continuous gradient (`1 + moon(0–3)`, moon peaking on the day of the syzygy)
-   plus wider weather/tide modifiers, so the full 1–5 range is used. `phase_name`
-   is unchanged — the lunar widget still wants one crisp label.
+   continuous gradient (`1 + moon(0–4)`, moon peaking on the day of the syzygy
+   and spent six days out) with a **bounded** weather/tide adjustment
+   (`clamp(…, −2.5, +1.0)`) so the moon sets the week's shape and weather can't
+   reorder it. Across 2026 the moon term alone now spreads 10/19/20/19/29% over
+   5★…1★, against the addendum table's 27/45/27/0/0. `phase_name` is unchanged
+   — the lunar widget still wants one crisp label.
 
 9. **Solunar star rating: barometric nudge is today-only.** The pressure trend
    is a *now* signal read from live observations; the forecast feed carries no

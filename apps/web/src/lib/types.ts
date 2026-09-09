@@ -394,11 +394,14 @@ export type TideStrength = 'strong' | 'average' | 'weak';
 /** Per-factor breakdown of the star score. `pressure` is present for today
  * only — the forecast feed carries no barometric data for future days. */
 export interface FishingFactors {
-  /** 0–3, continuous: 3 on the day of new/full, 0 at the quarters. */
+  /** 0–4, continuous: full weight on the day of new/full, 0 six days out. */
   moon: number;
   wind: number;
   tide: number;
   pressure?: number;
+  /** The bounded `pressure + wind + tide` sum that actually reaches the score
+   * (clamped to −2.5…+1.0 so weather shapes within the moon's envelope). */
+  weather_adjustment: number;
 }
 
 export interface FishingDay {
