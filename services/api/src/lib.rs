@@ -136,6 +136,11 @@ pub struct Caches {
     /// The tide station's decadal-average range (one number), for the fishing
     /// forecast's tide-strength modifier. Refreshed daily.
     pub tide_datums: RwLock<Option<CacheEntry>>,
+    /// Max daytime wind per date from the NWS forecast for the fishing grounds,
+    /// as `{"YYYY-MM-DD": mph}`. Two upstream hops that every forecast request
+    /// — including arbitrary-range ones, which skip the payload cache above —
+    /// otherwise repeats for the same answer.
+    pub fishing_wind: RwLock<Option<CacheEntry>>,
 }
 
 pub struct AppState {

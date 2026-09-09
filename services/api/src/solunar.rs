@@ -39,6 +39,16 @@ const FISHING_TTL: StdDuration = StdDuration::from_secs(60 * 60);
 /// Computed once, then sliced to the caller's `days`.
 const MAX_DAYS: i64 = 14;
 const DEFAULT_DAYS: i64 = 7;
+/// Longest explicit `start`/`end` window, both ends included. This is a
+/// reference lookup for choosing dates, not a data export.
+const MAX_RANGE_DAYS: i64 = 60;
+/// How far ahead such a window may start. The astronomy holds indefinitely and
+/// NOAA publishes tide predictions years out, so this is a sanity bound rather
+/// than a limit of the maths.
+const MAX_FUTURE_DAYS: i64 = 365;
+/// The NWS daily forecast moves on roughly the cadence of the weather card it
+/// also feeds.
+const WIND_TTL: StdDuration = StdDuration::from_secs(30 * 60);
 
 /// Half-width of a major period (upper/lower transit ± this) — ~2 h total.
 const MAJOR_HALF: i64 = 60;
@@ -524,23 +534,90 @@ fn star_rating(moon: f64, pressure: f64, wind: f64, tide: f64) -> i64 {
 #[derive(Deserialize)]
 pub struct ForecastParams {
     days: Option<i64>,
+    /// Explicit window, `YYYY-MM-DD`. Taken as strings rather than `NaiveDate`
+    /// so a typo comes back as our own error envelope instead of the
+    /// extractor's rejection.
+    start: Option<String>,
+    end: Option<String>,
 }
 
-/// `GET /api/fishing-forecast?days=7` — public, no auth. Default seven days
-/// (today plus the next six).
+/// `GET /api/fishing-forecast` — public, no auth. Two shapes:
+///
+/// * `?days=N` (default 7) — today plus the next N−1, served from the cached
+///   payload. This is what the landing page's quick-glance widget asks for.
+/// * `?start=YYYY-MM-DD&end=YYYY-MM-DD` — an explicit window, up to
+///   `MAX_RANGE_DAYS` long and starting no more than `MAX_FUTURE_DAYS` out.
+///
+/// Both run the same scoring; see [`Feeds`].
 pub async fn fishing_forecast(
     State(state): State<Shared>,
     Query(params): Query<ForecastParams>,
 ) -> ApiResult<Json<Value>> {
+    let today = Utc::now().with_timezone(&Chicago).date_naive();
+
+    // An explicit window is computed per request — it can start anywhere, so the
+    // today-anchored payload cache below is no help. The feeds behind it are
+    // each cached in their own right, and the tide window reuses the landing
+    // page's seven-day feed whenever it already spans the request, so the
+    // common cases cost nothing upstream.
+    if let Some((start, end)) = requested_range(&params, today)? {
+        let feeds = Feeds::fetch(&state, today, start, end).await;
+        return Ok(Json(feeds.payload(start, end)));
+    }
+
     let days = params.days.unwrap_or(DEFAULT_DAYS).clamp(1, MAX_DAYS);
 
     if let Some(cached) = weather::cached(&state.cache.fishing, FISHING_TTL).await {
         return Ok(Json(slice_days(cached, days)));
     }
 
-    let full = build_forecast(&state).await.map_err(AppError::Internal)?;
+    let full = build_forecast(&state).await;
     weather::store(&state.cache.fishing, full.clone()).await;
     Ok(Json(slice_days(full, days)))
+}
+
+/// The window an explicit request asked for, or `None` for the legacy
+/// today-anchored `days=N` form.
+fn requested_range(
+    params: &ForecastParams,
+    today: NaiveDate,
+) -> Result<Option<(NaiveDate, NaiveDate)>, AppError> {
+    let (start, end) = match (&params.start, &params.end) {
+        (None, None) => return Ok(None),
+        (Some(s), Some(e)) => (parse_date(s, "start")?, parse_date(e, "end")?),
+        _ => {
+            return Err(AppError::BadRequest(
+                "Give both start and end dates, or neither.".into(),
+            ));
+        }
+    };
+
+    if end < start {
+        return Err(AppError::BadRequest(
+            "The end date has to be on or after the start date.".into(),
+        ));
+    }
+
+    let span = (end - start).num_days() + 1;
+    if span > MAX_RANGE_DAYS {
+        return Err(AppError::BadRequest(format!(
+            "That's a {span}-day range. This forecast covers up to {MAX_RANGE_DAYS} days at a time."
+        )));
+    }
+
+    let lead = (start - today).num_days();
+    if lead > MAX_FUTURE_DAYS {
+        return Err(AppError::BadRequest(format!(
+            "That start date is {lead} days out. This forecast looks up to {MAX_FUTURE_DAYS} days ahead."
+        )));
+    }
+
+    Ok(Some((start, end)))
+}
+
+fn parse_date(raw: &str, field: &str) -> Result<NaiveDate, AppError> {
+    NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+        .map_err(|_| AppError::BadRequest(format!("`{field}` must be a date like 2026-10-01.")))
 }
 
 /// The cached payload always holds `MAX_DAYS`; trim it to what was asked for.
@@ -551,32 +628,60 @@ fn slice_days(mut payload: Value, days: i64) -> Value {
     payload
 }
 
-async fn build_forecast(state: &Shared) -> anyhow::Result<Value> {
-    let now = Utc::now();
-    let today = now.with_timezone(&Chicago).date_naive();
+/// Everything a day's rating is measured against, fetched once and shared by
+/// every day in the request.
+///
+/// Both entry points build one of these and run the same [`Feeds::score_day`]
+/// over it, so the star formula — the moon gradient, the bounded weather/tide
+/// adjustment, the tide-strength thresholds — lives in exactly one place no
+/// matter which shape of request arrived.
+struct Feeds {
+    today: NaiveDate,
+    /// Whether the live observation feed answered at all. Today's pressure and
+    /// wind terms both ride on it, so it is also what makes today "weathered".
+    has_observation: bool,
+    today_pressure_mod: f64,
+    live_wind_mph: Option<f64>,
+    forecast_wind: HashMap<NaiveDate, f64>,
+    hilo: Vec<Value>,
+    baseline_range: Option<f64>,
+}
 
-    // Every feed here is best-effort: a missing one drops its modifier to
-    // neutral and the forecast still renders on the moon term alone.
-    let observations = weather::recent_observations(state)
-        .await
-        .unwrap_or_default();
-    let (trend, delta_mb) = weather::pressure_trend(&observations);
-    let today_pressure_mod = pressure_modifier(trend, delta_mb);
+impl Feeds {
+    /// Every feed here is best-effort: a missing one drops its modifier to
+    /// neutral and the forecast still renders on the moon term alone.
+    async fn fetch(state: &Shared, today: NaiveDate, start: NaiveDate, end: NaiveDate) -> Self {
+        let observations = weather::recent_observations(state)
+            .await
+            .unwrap_or_default();
+        let (trend, delta_mb) = weather::pressure_trend(&observations);
 
-    let live_wind_mph = observations
-        .first()
-        .and_then(|o| o.wind_kmh)
-        .map(weather::kmh_to_mph);
-    let forecast_wind = forecast_wind_by_day(state).await.unwrap_or_default();
+        Self {
+            today,
+            has_observation: !observations.is_empty(),
+            today_pressure_mod: pressure_modifier(trend, delta_mb),
+            live_wind_mph: observations
+                .first()
+                .and_then(|o| o.wind_kmh)
+                .map(weather::kmh_to_mph),
+            forecast_wind: forecast_wind_by_day(state).await,
+            hilo: weather::tide_hilo_range(state, start, end).await,
+            baseline_range: weather::baseline_tidal_range(state).await,
+        }
+    }
 
-    // Tide predictions are accurate weeks out, so — unlike pressure — the tide
-    // modifier applies to every forecast day, not just today.
-    let hilo = weather::tide_hilo(state).await;
-    let baseline_range = weather::baseline_tidal_range(state).await;
+    /// Whether this day's rating actually carries a weather component.
+    ///
+    /// Today rides the live observation (barometric trend plus the current
+    /// wind); later days ride the NWS daily forecast, which runs out after
+    /// about a week. Past that the score is moon and tide only — a real limit
+    /// of the available inputs, not a failure, which is why it is reported
+    /// rather than hidden.
+    fn weather_included(&self, date: NaiveDate) -> bool {
+        (date == self.today && self.has_observation) || self.forecast_wind.contains_key(&date)
+    }
 
-    let mut days = Vec::with_capacity(MAX_DAYS as usize);
-    for offset in 0..MAX_DAYS {
-        let date = today + Duration::days(offset);
+    fn score_day(&self, date: NaiveDate) -> Value {
         // Sample the phase at local noon, as the lunar widget does.
         let noon = to_utc(date.and_hms_opt(12, 0, 0).expect("valid noon"));
         let (phase, emoji) = weather::phase_name(weather::true_moon_fraction(noon));
@@ -585,18 +690,23 @@ async fn build_forecast(state: &Shared) -> anyhow::Result<Value> {
         let events = moon_events(date);
 
         // Wind: the live reading for today (freshest), the forecast otherwise.
-        let wind_mph = if offset == 0 {
-            live_wind_mph.or_else(|| forecast_wind.get(&date).copied())
+        let wind_mph = if date == self.today {
+            self.live_wind_mph
+                .or_else(|| self.forecast_wind.get(&date).copied())
         } else {
-            forecast_wind.get(&date).copied()
+            self.forecast_wind.get(&date).copied()
         };
         let wind_mod = wind_modifier(wind_mph);
 
-        let strength = tide_strength(day_tide_range(&hilo, date), baseline_range);
+        let strength = tide_strength(day_tide_range(&self.hilo, date), self.baseline_range);
         let tide_mod = tide_modifier(strength);
 
         // The barometric trend is a *now* signal; only today gets it.
-        let pressure_mod = if offset == 0 { today_pressure_mod } else { 0.0 };
+        let pressure_mod = if date == self.today {
+            self.today_pressure_mod
+        } else {
+            0.0
+        };
         let stars = star_rating(moon, pressure_mod, wind_mod, tide_mod);
 
         let mut factors = json!({
@@ -606,30 +716,50 @@ async fn build_forecast(state: &Shared) -> anyhow::Result<Value> {
             // The bounded sum that actually reaches the score.
             "weather_adjustment": round2(weather_adjustment(pressure_mod, wind_mod, tide_mod)),
         });
-        if offset == 0 {
+        if date == self.today {
             factors["pressure"] = json!(pressure_mod);
         }
 
-        days.push(json!({
+        json!({
             "date": date,
             "stars": stars,
             "rating_label": rating_label(stars),
             "moon_phase": phase,
             "moon_emoji": emoji,
             "tide_strength": strength,
+            "weather_included": self.weather_included(date),
             "factors": factors,
             "major_periods": periods(&[events.upper_transit, events.lower_transit], MAJOR_HALF),
             "minor_periods": periods(&[events.moonrise, events.moonset], MINOR_HALF),
-        }));
+        })
     }
 
-    Ok(json!({
-        "location": "Cocodrie estuary, Louisiana",
-        "timezone": "America/Chicago",
-        "generated_at": now,
-        "disclaimer": "Based on solunar theory — a fun guide, not a guarantee!",
-        "days": days,
-    }))
+    /// One response covering `start..=end`, both ends included.
+    fn payload(&self, start: NaiveDate, end: NaiveDate) -> Value {
+        let days: Vec<Value> = std::iter::successors(Some(start), |d| Some(*d + Duration::days(1)))
+            .take_while(|d| *d <= end)
+            .map(|d| self.score_day(d))
+            .collect();
+
+        json!({
+            "location": "Cocodrie estuary, Louisiana",
+            "timezone": "America/Chicago",
+            "generated_at": Utc::now(),
+            "start": start,
+            "end": end,
+            "disclaimer": "Based on solunar theory — a fun guide, not a guarantee!",
+            "days": days,
+        })
+    }
+}
+
+/// The today-anchored payload the `days=N` form is sliced out of.
+async fn build_forecast(state: &Shared) -> Value {
+    let today = Utc::now().with_timezone(&Chicago).date_naive();
+    let end = today + Duration::days(MAX_DAYS - 1);
+    Feeds::fetch(state, today, today, end)
+        .await
+        .payload(today, end)
 }
 
 fn round2(v: f64) -> f64 {
@@ -654,9 +784,35 @@ fn hhmm(dt: DateTime<Utc>) -> String {
     dt.with_timezone(&Chicago).format("%H:%M").to_string()
 }
 
-/// Max sustained wind (mph) the daytime forecast gives for each date. NOAA
-/// phrases it as `"10 mph"` or `"10 to 15 mph"`; take the larger number.
-async fn forecast_wind_by_day(state: &Shared) -> anyhow::Result<HashMap<NaiveDate, f64>> {
+/// Max sustained wind (mph) the NWS daytime forecast gives for each date it
+/// reaches — which is also what decides `weather_included`.
+///
+/// Cached: it is two upstream hops, and an explicit-range request skips the
+/// payload cache but still needs the same answer. Empty on failure, which
+/// leaves every wind modifier neutral.
+async fn forecast_wind_by_day(state: &Shared) -> HashMap<NaiveDate, f64> {
+    if let Some(v) = weather::cached(&state.cache.fishing_wind, WIND_TTL).await
+        && let Ok(map) = serde_json::from_value::<HashMap<NaiveDate, f64>>(v)
+    {
+        return map;
+    }
+
+    match fetch_forecast_wind(state).await {
+        Ok(map) => {
+            if let Ok(v) = serde_json::to_value(&map) {
+                weather::store(&state.cache.fishing_wind, v).await;
+            }
+            map
+        }
+        Err(e) => {
+            tracing::warn!(error = ?e, "NWS wind forecast unavailable; scoring without a wind term");
+            HashMap::new()
+        }
+    }
+}
+
+/// NOAA phrases wind as `"10 mph"` or `"10 to 15 mph"`; take the larger number.
+async fn fetch_forecast_wind(state: &Shared) -> anyhow::Result<HashMap<NaiveDate, f64>> {
     let points = weather::fetch_json(
         state,
         &format!("https://api.weather.gov/points/{FISHING_LAT},{FISHING_LON}"),
@@ -1227,6 +1383,247 @@ mod tests {
             eprintln!("  old: {}", pct(old_hist));
             eprintln!("  new: {}", pct(new_hist));
         }
+    }
+
+    // ─────────────── date-range lookup ───────────────
+
+    fn params(days: Option<i64>, start: Option<&str>, end: Option<&str>) -> ForecastParams {
+        ForecastParams {
+            days,
+            start: start.map(str::to_string),
+            end: end.map(str::to_string),
+        }
+    }
+
+    /// The window a request resolved to, or a panic with the rejection that
+    /// stopped it. (`AppError` has no `PartialEq` — an `anyhow` variant can't —
+    /// so the assertions below compare the resolved window instead.)
+    fn accepted(p: ForecastParams, today: NaiveDate) -> Option<(NaiveDate, NaiveDate)> {
+        requested_range(&p, today).expect("range should have been accepted")
+    }
+
+    /// The message a rejected range comes back with, or a panic if it was
+    /// accepted — every rejection here has to be legible to a guest.
+    fn rejection(p: ForecastParams, today: NaiveDate) -> String {
+        match requested_range(&p, today) {
+            Err(AppError::BadRequest(m)) => m,
+            Err(other) => panic!("expected a BadRequest, got {other:?}"),
+            Ok(range) => panic!("expected a rejection, got {range:?}"),
+        }
+    }
+
+    /// Regression guard: the landing widget's `?days=N` form must keep meaning
+    /// "today-anchored", i.e. no explicit range at all.
+    #[test]
+    fn days_param_alone_asks_for_no_explicit_range() {
+        let today = date(2026, 9, 9);
+        assert_eq!(accepted(params(Some(7), None, None), today), None);
+        assert_eq!(accepted(params(None, None, None), today), None);
+    }
+
+    #[test]
+    fn explicit_range_is_parsed_inclusively() {
+        let got = accepted(
+            params(None, Some("2026-10-01"), Some("2026-10-08")),
+            date(2026, 9, 9),
+        );
+        assert_eq!(got, Some((date(2026, 10, 1), date(2026, 10, 8))));
+    }
+
+    /// A one-day window is legitimate — "how is next Saturday?".
+    #[test]
+    fn single_day_range_is_allowed() {
+        let d = date(2026, 10, 1);
+        let got = accepted(params(None, Some("2026-10-01"), Some("2026-10-01")), d);
+        assert_eq!(got, Some((d, d)));
+    }
+
+    #[test]
+    fn end_before_start_is_rejected() {
+        let msg = rejection(
+            params(None, Some("2026-10-08"), Some("2026-10-01")),
+            date(2026, 9, 9),
+        );
+        assert!(msg.contains("on or after"), "{msg}");
+    }
+
+    #[test]
+    fn range_longer_than_the_cap_is_rejected() {
+        let today = date(2026, 9, 9);
+        // Exactly at the cap is fine; one more day is not.
+        let last_ok = today + Duration::days(MAX_RANGE_DAYS - 1);
+        assert_eq!(
+            accepted(
+                params(None, Some("2026-09-09"), Some(&last_ok.to_string())),
+                today,
+            ),
+            Some((today, last_ok)),
+        );
+
+        let too_far = today + Duration::days(MAX_RANGE_DAYS);
+        let msg = rejection(
+            params(None, Some("2026-09-09"), Some(&too_far.to_string())),
+            today,
+        );
+        assert!(msg.contains("61-day"), "{msg}");
+        assert!(msg.contains(&MAX_RANGE_DAYS.to_string()), "{msg}");
+    }
+
+    #[test]
+    fn range_starting_too_far_out_is_rejected() {
+        let today = date(2026, 9, 9);
+        let ok_start = today + Duration::days(MAX_FUTURE_DAYS);
+        assert_eq!(
+            accepted(
+                params(
+                    None,
+                    Some(&ok_start.to_string()),
+                    Some(&ok_start.to_string())
+                ),
+                today,
+            ),
+            Some((ok_start, ok_start)),
+        );
+
+        // 13 months out — the spec's example of an absurd request.
+        let far = today + Duration::days(396);
+        let msg = rejection(
+            params(None, Some(&far.to_string()), Some(&far.to_string())),
+            today,
+        );
+        assert!(msg.contains("396 days out"), "{msg}");
+    }
+
+    #[test]
+    fn half_a_range_is_rejected() {
+        let today = date(2026, 9, 9);
+        let msg = rejection(params(None, Some("2026-10-01"), None), today);
+        assert!(msg.contains("both"), "{msg}");
+        assert!(rejection(params(None, None, Some("2026-10-01")), today).contains("both"));
+    }
+
+    #[test]
+    fn a_malformed_date_names_the_field_it_came_from() {
+        let today = date(2026, 9, 9);
+        assert!(
+            rejection(params(None, Some("10/01/2026"), Some("2026-10-08")), today)
+                .contains("`start`")
+        );
+        assert!(
+            rejection(params(None, Some("2026-10-01"), Some("nonsense")), today).contains("`end`")
+        );
+    }
+
+    // ─────────────── weather_included ───────────────
+
+    /// A `Feeds` with no network behind it: `wind` is the dates the NWS
+    /// forecast reached, `observed` whether the live station answered.
+    fn feeds(today: NaiveDate, wind: &[NaiveDate], observed: bool) -> Feeds {
+        Feeds {
+            today,
+            has_observation: observed,
+            today_pressure_mod: 0.0,
+            live_wind_mph: observed.then_some(8.0),
+            forecast_wind: wind.iter().map(|d| (*d, 10.0)).collect(),
+            hilo: Vec::new(),
+            baseline_range: None,
+        }
+    }
+
+    /// The horizon is whatever the NWS feed actually reached — about a week —
+    /// and days past it are moon + tide only.
+    #[test]
+    fn weather_included_tracks_the_real_forecast_horizon() {
+        let today = date(2026, 9, 9);
+        let horizon: Vec<NaiveDate> = (0..7).map(|i| today + Duration::days(i)).collect();
+        let f = feeds(today, &horizon, true);
+
+        for (i, d) in horizon.iter().enumerate() {
+            assert!(f.weather_included(*d), "day +{i} should carry weather");
+        }
+        assert!(!f.weather_included(today + Duration::days(7)));
+        assert!(!f.weather_included(today + Duration::days(90)));
+    }
+
+    /// Today still counts on the live observation alone — that is where the
+    /// barometric term comes from, and it is the one day that has one.
+    #[test]
+    fn today_is_weathered_by_the_live_observation() {
+        let today = date(2026, 9, 9);
+        assert!(feeds(today, &[], true).weather_included(today));
+        assert!(!feeds(today, &[], false).weather_included(today));
+    }
+
+    /// With every weather feed down, no day claims a weather component — but
+    /// the days still score, on the moon term alone.
+    #[test]
+    fn a_dead_weather_feed_reports_honestly() {
+        let today = date(2026, 9, 9);
+        let f = feeds(today, &[], false);
+        let day = f.score_day(today);
+        assert_eq!(day["weather_included"], json!(false));
+        assert!(day["stars"].as_i64().is_some_and(|s| (1..=5).contains(&s)));
+    }
+
+    // ─────────────── payload shape ───────────────
+
+    /// The window is inclusive of both ends and comes back in order.
+    #[test]
+    fn payload_covers_the_requested_window_inclusively() {
+        let today = date(2026, 9, 9);
+        let start = date(2026, 10, 1);
+        let end = date(2026, 10, 8);
+        let payload = feeds(today, &[], false).payload(start, end);
+
+        let days = payload["days"].as_array().unwrap();
+        assert_eq!(days.len(), 8, "1st through 8th, both included");
+        assert_eq!(days[0]["date"], json!("2026-10-01"));
+        assert_eq!(days[7]["date"], json!("2026-10-08"));
+        assert_eq!(payload["start"], json!("2026-10-01"));
+        assert_eq!(payload["end"], json!("2026-10-08"));
+    }
+
+    /// Far-future days keep the astronomy — the windows and the moon term are
+    /// the whole point of looking that far ahead.
+    #[test]
+    fn a_far_future_day_still_carries_moon_and_period_data() {
+        let today = date(2026, 9, 9);
+        let far = date(2027, 3, 15);
+        let day = feeds(today, &[], false).score_day(far);
+
+        assert_eq!(day["weather_included"], json!(false));
+        assert!(day["moon_phase"].as_str().is_some_and(|p| !p.is_empty()));
+        assert!(!day["major_periods"].as_array().unwrap().is_empty());
+        assert!(!day["minor_periods"].as_array().unwrap().is_empty());
+        assert!(day["factors"]["moon"].as_f64().is_some());
+        // No pressure term off today — it is a now-only signal.
+        assert!(day["factors"]["pressure"].is_null());
+    }
+
+    /// `slice_days` still trims the cached today-anchored payload, unchanged.
+    #[test]
+    fn slice_days_trims_to_the_requested_count() {
+        let today = date(2026, 9, 9);
+        let full = feeds(today, &[], false).payload(today, today + Duration::days(MAX_DAYS - 1));
+        assert_eq!(full["days"].as_array().unwrap().len(), MAX_DAYS as usize);
+
+        let sliced = slice_days(full, DEFAULT_DAYS);
+        assert_eq!(
+            sliced["days"].as_array().unwrap().len(),
+            DEFAULT_DAYS as usize
+        );
+        assert_eq!(sliced["days"][0]["date"], json!("2026-09-09"));
+    }
+
+    /// The wind map is cached as JSON, so its keys have to survive the round
+    /// trip — a silently empty map would quietly drop every wind modifier.
+    #[test]
+    fn the_wind_cache_round_trips_through_json() {
+        let map: HashMap<NaiveDate, f64> =
+            HashMap::from([(date(2026, 9, 9), 12.0), (date(2026, 9, 10), 18.0)]);
+        let back: HashMap<NaiveDate, f64> =
+            serde_json::from_value(serde_json::to_value(&map).unwrap()).unwrap();
+        assert_eq!(back, map);
     }
 
     /// The moon's distance stays inside its real perigee/apogee envelope, a

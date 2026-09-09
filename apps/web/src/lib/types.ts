@@ -413,6 +413,10 @@ export interface FishingDay {
   moon_emoji: string;
   /** Day's predicted tidal range vs the station's Great Diurnal Range. */
   tide_strength: TideStrength;
+  /** Whether a weather term actually reached this day's score. True for today
+   * (live observation) and the ~7 days the NWS forecast covers; false beyond
+   * that, where the rating is moon and tide only. */
+  weather_included: boolean;
   factors: FishingFactors;
   /** ~2 h, bracketing the moon's upper and lower transit. */
   major_periods: SolunarPeriod[];
@@ -424,6 +428,9 @@ export interface FishingForecast {
   location: string;
   timezone: string;
   generated_at: string;
+  /** Present on an explicit `start`/`end` lookup; absent on the `days=N` form. */
+  start?: string;
+  end?: string;
   disclaimer: string;
   days: FishingDay[];
 }

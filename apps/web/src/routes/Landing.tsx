@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { addDays, format } from 'date-fns';
 import {
+  ArrowRight,
   CalendarDays,
   CheckCircle2,
   ExternalLink,
@@ -339,6 +340,15 @@ export default function Landing() {
               <LunarWidget />
             </div>
             <FishingWidget />
+            <div className="flex justify-end">
+              <Link
+                to="/forecast"
+                className="inline-flex items-center gap-1.5 text-sm font-semibold text-forest-600 hover:text-forest-700"
+              >
+                See full forecast
+                <ArrowRight size={15} />
+              </Link>
+            </div>
           </div>
         </Section>
       </div>

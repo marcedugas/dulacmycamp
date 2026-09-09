@@ -3,7 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { addDays } from 'date-fns';
 import { toast } from 'sonner';
-import { CheckCircle2, Info, Lock, TriangleAlert, Users } from 'lucide-react';
+import { CheckCircle2, Fish, Info, Lock, TriangleAlert, Users } from 'lucide-react';
 import { buildIndex } from '../components/CampCalendar';
 import { Button, Card, Field, Input, PageHeader, Textarea, cx } from '../components/ui';
 import { api, ApiError } from '../lib/api';
@@ -155,9 +155,19 @@ export default function BookPage() {
           </div>
 
           {valid && (
-            <p className="-mt-2 text-sm text-muted">
-              {formatRange(checkIn, checkOut)} · {pluralNights(nightCount(checkIn, checkOut))}
-            </p>
+            <div className="-mt-2 space-y-1.5">
+              <p className="text-sm text-muted">
+                {formatRange(checkIn, checkOut)} · {pluralNights(nightCount(checkIn, checkOut))}
+              </p>
+              {/* The forecast page reads the same `from`/`to` params this page does. */}
+              <Link
+                to={`/forecast?from=${checkIn}&to=${checkOut}`}
+                className="inline-flex items-center gap-1.5 text-sm font-semibold text-forest-600 hover:text-forest-700"
+              >
+                <Fish size={15} />
+                Check the fishing forecast for these dates
+              </Link>
+            </div>
           )}
 
           {/* Unavailable dates are surfaced here rather than disabled outright —

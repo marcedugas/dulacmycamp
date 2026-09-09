@@ -1,11 +1,10 @@
 import { useQuery } from '@tanstack/react-query';
 import { format } from 'date-fns';
-import { Droplets, Fish, Moon, Star, Sunrise, Sunset, Waves, Wind } from 'lucide-react';
+import { Droplets, Fish, Moon, Sunrise, Sunset, Waves, Wind } from 'lucide-react';
 import { api } from '../lib/api';
 import type {
   FishingForecast,
   Lunar,
-  SolunarPeriod,
   TideCurvePoint,
   TidePrediction,
   Tides,
@@ -13,6 +12,7 @@ import type {
 } from '../lib/types';
 import { parseDay } from '../lib/dates';
 import { ForecastAboutButton } from './ForecastAbout';
+import { DayStars, PeriodColumn, StarRating } from './ForecastDay';
 import { Card, Spinner, cx } from './ui';
 
 /**
@@ -395,47 +395,6 @@ export function LunarWidget() {
 
 // ─────────────────────────── fishing forecast ───────────────────────────
 
-/** "14:30" (local, from the API) → "2:30 PM". */
-function fmtPeriodTime(hm: string): string {
-  const [h, m] = hm.split(':').map(Number);
-  const d = new Date();
-  d.setHours(h, m, 0, 0);
-  return format(d, 'h:mm a');
-}
-
-function StarRating({ stars }: { stars: number }) {
-  return (
-    <span className="flex gap-0.5" aria-label={`${stars} out of 5 stars`}>
-      {[1, 2, 3, 4, 5].map((n) => (
-        <Star
-          key={n}
-          size={18}
-          className={n <= stars ? 'fill-current text-wood-500' : 'text-sand'}
-        />
-      ))}
-    </span>
-  );
-}
-
-function PeriodColumn({ label, periods }: { label: string; periods: SolunarPeriod[] }) {
-  return (
-    <div>
-      <p className="text-[11px] font-bold uppercase tracking-wide text-muted">{label}</p>
-      {periods.length === 0 ? (
-        <p className="text-muted">—</p>
-      ) : (
-        <ul className="mt-1 space-y-0.5">
-          {periods.map((p) => (
-            <li key={p.start} className="font-semibold tabular-nums text-charcoal">
-              {fmtPeriodTime(p.start)} – {fmtPeriodTime(p.end)}
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
-}
-
 export function FishingWidget() {
   const { data, isLoading, isError } = useQuery({
     queryKey: ['fishing-forecast'],
@@ -485,10 +444,7 @@ export function FishingWidget() {
                   {format(parseDay(d.date), 'EEE')}
                 </p>
                 <p className="text-[10px] text-muted">{format(parseDay(d.date), 'M/d')}</p>
-                <p className="mt-1 text-sm font-bold tracking-tight text-wood-600" aria-hidden>
-                  {'★'.repeat(d.stars)}
-                  <span className="text-sand">{'★'.repeat(5 - d.stars)}</span>
-                </p>
+                <DayStars stars={d.stars} />
               </div>
             ))}
           </div>

@@ -53,3 +53,11 @@ export function formatRange(checkIn: string, checkOut: string): string {
 export function pluralNights(n: number): string {
   return `${n} ${n === 1 ? 'night' : 'nights'}`;
 }
+
+/** A solunar period's "14:30" (local, from the API) as "2:30 PM". */
+export function formatPeriodTime(hm: string): string {
+  const [h, m] = hm.split(':').map(Number);
+  const d = new Date();
+  d.setHours(h, m, 0, 0);
+  return format(d, 'h:mm a');
+}

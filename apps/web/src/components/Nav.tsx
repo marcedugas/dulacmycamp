@@ -72,11 +72,13 @@ export default function Nav() {
         { to: '/book', label: 'Book' },
         { to: '/my-bookings', label: 'My Bookings' },
         { to: '/my-stay', label: 'My Stay' },
+        { to: '/forecast', label: 'Forecast' },
         { to: '/journal', label: 'Journal' },
       ]
     : [
         { to: '/calendar', label: 'Calendar' },
         { to: '/book', label: 'Book Now' },
+        { to: '/forecast', label: 'Forecast' },
         { to: '/journal', label: 'Journal' },
       ];
 

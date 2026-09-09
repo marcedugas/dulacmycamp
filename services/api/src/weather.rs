@@ -328,24 +328,7 @@ async fn fetch_tides(state: &Shared) -> anyhow::Result<Value> {
         anyhow::bail!("NOAA tides: {err}");
     }
 
-    let next_tides: Vec<Value> = data["predictions"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .iter()
-        .map(|p| {
-            json!({
-                // Already local (lst_ldt) — "YYYY-MM-DD HH:MM".
-                "time": p["t"],
-                "height_ft": p["v"].as_str().and_then(|v| v.parse::<f64>().ok()),
-                "kind": match p["type"].as_str() {
-                    Some("H") => "high",
-                    Some("L") => "low",
-                    _ => "unknown",
-                },
-            })
-        })
-        .collect();
+    let next_tides = parse_hilo(&data);
 
     // A continuous hourly curve so the widget can draw the tide's shape, not
     // just its turning points. Best-effort on its own request: if only this
@@ -380,6 +363,98 @@ async fn fetch_tides(state: &Shared) -> anyhow::Result<Value> {
         "curve": curve,
         "updated_at": Utc::now(),
     }))
+}
+
+/// Pulls the `{ time, height_ft, kind }` turning points out of a datagetter
+/// `interval=hilo` response. Shared by the rolling seven-day feed and the
+/// explicit-window fetch below so both speak the same row shape.
+fn parse_hilo(data: &Value) -> Vec<Value> {
+    data["predictions"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .map(|p| {
+            json!({
+                // Already local (lst_ldt) — "YYYY-MM-DD HH:MM".
+                "time": p["t"],
+                "height_ft": p["v"].as_str().and_then(|v| v.parse::<f64>().ok()),
+                "kind": match p["type"].as_str() {
+                    Some("H") => "high",
+                    Some("L") => "low",
+                    _ => "unknown",
+                },
+            })
+        })
+        .collect()
+}
+
+/// URL for the hi/lo predictions across an explicit `start..=end` window.
+/// Split out for the same reason as `tide_curve_url` — the query shape is
+/// worth a test, the network call isn't.
+fn hilo_window_url(station: &str, start: NaiveDate, end: NaiveDate) -> String {
+    format!(
+        "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter\
+         ?product=predictions&application=dulacmycamp\
+         &begin_date={}&end_date={}\
+         &datum=MLLW&station={station}&time_zone=lst_ldt&units=english\
+         &interval=hilo&format=json",
+        start.format("%Y%m%d"),
+        end.format("%Y%m%d"),
+    )
+}
+
+/// Hi/lo predictions covering `start..=end`.
+///
+/// Tide predictions are pure astronomy and NOAA publishes them years ahead, so
+/// an arbitrary future window is an ordinary request. The rolling seven-day
+/// feed is already cached for the landing page, though, so when it happens to
+/// span the request — which it does for the default "next week" view — this
+/// costs nothing. Empty on failure; the caller drops the tide modifier.
+pub(crate) async fn tide_hilo_range(
+    state: &Shared,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Vec<Value> {
+    if let Some(rows) = cached(&state.cache.tides, TIDES_TTL)
+        .await
+        .and_then(|blob| blob["next_tides"].as_array().cloned())
+        && hilo_spans(&rows, start, end)
+    {
+        return rows;
+    }
+
+    let url = hilo_window_url(&state.cfg.noaa_station_id, start, end);
+    match fetch_json(state, &url).await {
+        Ok(data) => match data["error"]["message"].as_str() {
+            Some(err) => {
+                tracing::warn!(error = err, "NOAA rejected the tide window request");
+                Vec::new()
+            }
+            None => parse_hilo(&data),
+        },
+        Err(e) => {
+            tracing::warn!(error = ?e, "tide window fetch failed; scoring without the tide term");
+            Vec::new()
+        }
+    }
+}
+
+/// Whether `rows` (local "YYYY-MM-DD HH:MM" times) reach both ends of the
+/// requested window. A day needs at least its own turning points to be scored,
+/// so partial coverage is not enough.
+fn hilo_spans(rows: &[Value], start: NaiveDate, end: NaiveDate) -> bool {
+    let day = |v: &Value| {
+        v["time"]
+            .as_str()
+            .and_then(|t| NaiveDate::parse_from_str(&t[..10.min(t.len())], "%Y-%m-%d").ok())
+    };
+    let mut days = rows.iter().filter_map(day);
+    let Some(first) = days.next() else {
+        return false;
+    };
+    let (min, max) = days.fold((first, first), |(lo, hi), d| (lo.min(d), hi.max(d)));
+    min <= start && max >= end
 }
 
 /// URL for a continuous hourly prediction window — `interval=h`, `range=48`
@@ -460,26 +535,6 @@ pub(crate) async fn baseline_tidal_range(state: &Shared) -> Option<f64> {
     // the forecast that calls this is itself cached), not stick for a day.
     store(&state.cache.tide_datums, json!(range)).await;
     Some(range)
-}
-
-/// The 7-day hi/lo predictions, read from the tide feed's cache (populating it
-/// if cold). Shared with `GET /api/tides` so the fishing forecast doesn't fetch
-/// the same data twice. Empty on failure — the caller drops the tide modifier.
-pub(crate) async fn tide_hilo(state: &Shared) -> Vec<Value> {
-    let blob = match cached(&state.cache.tides, TIDES_TTL).await {
-        Some(v) => v,
-        None => match fetch_tides(state).await {
-            Ok(v) => {
-                store(&state.cache.tides, v.clone()).await;
-                v
-            }
-            Err(e) => {
-                tracing::warn!(error = ?e, "tide feed unavailable for the fishing forecast");
-                return Vec::new();
-            }
-        },
-    };
-    blob["next_tides"].as_array().cloned().unwrap_or_default()
 }
 
 // ─────────────────────────── lunar + solar ───────────────────────────
@@ -854,6 +909,39 @@ mod tests {
         assert!(url.contains("begin_date=20260908%2006:00"), "{url}");
         assert!(url.contains("station=8762928"), "{url}");
         assert!(url.contains("time_zone=lst_ldt"), "{url}");
+    }
+
+    #[test]
+    fn hilo_window_url_asks_for_the_exact_range() {
+        let url = hilo_window_url(
+            "8762928",
+            NaiveDate::from_ymd_opt(2026, 10, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 10, 8).unwrap(),
+        );
+        assert!(url.contains("begin_date=20261001"), "{url}");
+        assert!(url.contains("end_date=20261008"), "{url}");
+        assert!(url.contains("interval=hilo"), "{url}");
+        assert!(url.contains("station=8762928"), "{url}");
+        // No `range=` — begin/end bound the window instead, and NOAA rejects
+        // a request carrying both.
+        assert!(!url.contains("range="), "{url}");
+    }
+
+    /// The cached seven-day feed is only reusable when it actually reaches both
+    /// ends of the window; a far-future range has to go back to NOAA.
+    #[test]
+    fn hilo_spans_only_accepts_full_coverage() {
+        let rows: Vec<Value> = ["2026-09-09 05:12", "2026-09-12 06:03", "2026-09-15 07:41"]
+            .iter()
+            .map(|t| json!({ "time": t, "height_ft": 1.2, "kind": "high" }))
+            .collect();
+        let d = |m, day| NaiveDate::from_ymd_opt(2026, m, day).unwrap();
+
+        assert!(hilo_spans(&rows, d(9, 10), d(9, 14)), "inside the window");
+        assert!(hilo_spans(&rows, d(9, 9), d(9, 15)), "exactly the window");
+        assert!(!hilo_spans(&rows, d(9, 8), d(9, 14)), "starts before");
+        assert!(!hilo_spans(&rows, d(9, 10), d(9, 16)), "ends after");
+        assert!(!hilo_spans(&[], d(9, 10), d(9, 14)), "nothing cached");
     }
 
     #[test]

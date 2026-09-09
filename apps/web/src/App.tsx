@@ -6,6 +6,7 @@ import { Spinner } from './components/ui';
 import { useAuth } from './lib/auth';
 import Landing from './routes/Landing';
 import CalendarPage from './routes/CalendarPage';
+import ForecastPage from './routes/ForecastPage';
 import BookPage from './routes/BookPage';
 import MyBookings from './routes/MyBookings';
 import Profile from './routes/Profile';
@@ -45,6 +46,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Landing />} />
           <Route path="/calendar" element={<CalendarPage />} />
+          <Route path="/forecast" element={<ForecastPage />} />
           <Route path="/login" element={<Login />} />
           <Route
             path="/book"
