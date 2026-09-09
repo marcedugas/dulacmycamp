@@ -1,5 +1,6 @@
 import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode, TextareaHTMLAttributes } from 'react';
 import { useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import type { BookingStatus, JournalStatus } from '../lib/types';
 
@@ -181,11 +182,14 @@ export function Modal({
   open,
   onClose,
   title,
+  size = 'md',
   children,
 }: {
   open: boolean;
   onClose: () => void;
   title: string;
+  /** Wider panel for reading-length content; forms stay on the default. */
+  size?: 'md' | 'lg';
   children: ReactNode;
 }) {
   useEffect(() => {
@@ -197,8 +201,11 @@ export function Modal({
 
   if (!open) return null;
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+  // Portalled to the body: a modal opened from styled text (the widget headers
+  // are uppercase and letter-spaced) would otherwise inherit that typography,
+  // and it sidesteps any stacking context an ancestor introduces.
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 text-base font-normal normal-case tracking-normal text-charcoal">
       <div
         className="absolute inset-0 bg-charcoal/50"
         onClick={onClose}
@@ -208,7 +215,10 @@ export function Modal({
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className="relative w-full max-w-md rounded-xl border border-sand bg-cream p-5 shadow-xl"
+        className={cx(
+          'relative flex max-h-[85vh] w-full flex-col rounded-xl border border-sand bg-cream p-5 shadow-xl',
+          size === 'lg' ? 'max-w-lg' : 'max-w-md',
+        )}
       >
         <div className="mb-4 flex items-start justify-between gap-4">
           <h3 className="text-lg font-bold text-charcoal">{title}</h3>
@@ -216,8 +226,10 @@ export function Modal({
             <X size={18} />
           </button>
         </div>
-        {children}
+        {/* Long content scrolls inside the panel rather than off a short screen. */}
+        <div className="-mx-1 min-h-0 flex-1 overflow-y-auto px-1">{children}</div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

@@ -12,6 +12,7 @@ import type {
   Weather,
 } from '../lib/types';
 import { parseDay } from '../lib/dates';
+import { ForecastAboutButton } from './ForecastAbout';
 import { Card, Spinner, cx } from './ui';
 
 /**
@@ -45,12 +46,16 @@ function WidgetShell({
   icon,
   loading,
   error,
+  action,
   children,
 }: {
   title: string;
   icon: React.ReactNode;
   loading: boolean;
   error: boolean;
+  /** Optional control pinned to the right of the header — stays put while the
+   * body is still loading or errored. */
+  action?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
@@ -58,6 +63,7 @@ function WidgetShell({
       <div className="mb-3 flex items-center gap-2 text-sm font-bold uppercase tracking-wide text-muted">
         {icon}
         {title}
+        {action && <span className="ml-auto">{action}</span>}
       </div>
       {loading ? (
         <div className="flex flex-1 items-center justify-center py-6">
@@ -445,6 +451,7 @@ export function FishingWidget() {
       icon={<Fish size={15} />}
       loading={isLoading}
       error={isError || !data || !today}
+      action={<ForecastAboutButton />}
     >
       {today && (
         <>
