@@ -104,14 +104,21 @@ async fn delete_upload_file(state: &Shared, url: &str) {
 struct SettingsRow {
     hero_title: String,
     hero_subtitle: String,
-    about_text: String,
+    about_camp_text: String,
+    about_dulac_text: String,
+    last_island_text: String,
+    /// Free text: a street address, or bare "lat,lng" for a camp with no
+    /// clean mailing address. Used verbatim as a Google Maps destination,
+    /// which accepts either — so nothing here parses or validates it.
+    camp_address: Option<String>,
     hero_image_url: Option<String>,
     guest_photos_url: Option<String>,
 }
 
 async fn fetch_settings(db: &PgPool) -> Result<SettingsRow, sqlx::Error> {
     sqlx::query_as::<_, SettingsRow>(
-        "SELECT hero_title, hero_subtitle, about_text, hero_image_url, guest_photos_url
+        "SELECT hero_title, hero_subtitle, about_camp_text, about_dulac_text, last_island_text,
+                camp_address, hero_image_url, guest_photos_url
          FROM site_settings WHERE id = $1",
     )
     .bind(SETTINGS_ID)
@@ -150,7 +157,14 @@ pub struct GalleryPublic {
 pub struct PublicSiteContent {
     pub hero_title: String,
     pub hero_subtitle: String,
-    pub about_text: String,
+    /// The three About stories, each rendered as its own section. Split out
+    /// of a single `about_text` blurb in migration 0012.
+    pub about_camp_text: String,
+    pub about_dulac_text: String,
+    pub last_island_text: String,
+    /// Where the camp is, for the directions link. `None` (or blank) means
+    /// the admin hasn't set one, and the address and button are both omitted.
+    pub camp_address: Option<String>,
     pub hero_image_url: Option<String>,
     pub rules: Vec<RulePublic>,
     pub amenities: Vec<AmenityPublic>,
@@ -180,7 +194,10 @@ pub async fn get_site_content(State(state): State<Shared>) -> ApiResult<Json<Pub
     Ok(Json(PublicSiteContent {
         hero_title: settings.hero_title,
         hero_subtitle: settings.hero_subtitle,
-        about_text: settings.about_text,
+        about_camp_text: settings.about_camp_text,
+        about_dulac_text: settings.about_dulac_text,
+        last_island_text: settings.last_island_text,
+        camp_address: settings.camp_address,
         hero_image_url: settings.hero_image_url,
         rules,
         amenities,
@@ -245,7 +262,10 @@ pub async fn guest_photos_link(
 pub struct UpdateSettings {
     pub hero_title: String,
     pub hero_subtitle: String,
-    pub about_text: String,
+    pub about_camp_text: String,
+    pub about_dulac_text: String,
+    pub last_island_text: String,
+    pub camp_address: Option<String>,
     pub guest_photos_url: Option<String>,
 }
 
@@ -276,16 +296,28 @@ pub async fn update_settings(
         ));
     }
 
+    // Blank and unset are the same thing for an address: both mean "no
+    // directions link", and storing "   " would render an empty one.
+    let camp_address = body
+        .camp_address
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
     sqlx::query(
         "UPDATE site_settings
-         SET hero_title = $2, hero_subtitle = $3, about_text = $4, guest_photos_url = $5,
+         SET hero_title = $2, hero_subtitle = $3, about_camp_text = $4, about_dulac_text = $5,
+             last_island_text = $6, camp_address = $7, guest_photos_url = $8,
              updated_at = now()
          WHERE id = $1",
     )
     .bind(SETTINGS_ID)
     .bind(hero_title)
     .bind(hero_subtitle)
-    .bind(body.about_text.trim())
+    .bind(body.about_camp_text.trim())
+    .bind(body.about_dulac_text.trim())
+    .bind(body.last_island_text.trim())
+    .bind(camp_address)
     .bind(guest_photos_url)
     .execute(&state.db)
     .await?;
@@ -650,7 +682,10 @@ mod tests {
         let payload = PublicSiteContent {
             hero_title: "Dulac My Camp".into(),
             hero_subtitle: "On the bayou".into(),
-            about_text: "A camp.".into(),
+            about_camp_text: "A camp.".into(),
+            about_dulac_text: "A town.".into(),
+            last_island_text: "An island.".into(),
+            camp_address: Some("29.3802, -90.7148".into()),
             hero_image_url: Some("/uploads/hero.jpg".into()),
             rules: vec![],
             amenities: vec![],
@@ -665,6 +700,32 @@ mod tests {
         // The rest of the landing page still arrives.
         assert!(object.contains_key("hero_title"));
         assert!(object.contains_key("gallery"));
+    }
+
+    // All three About stories and the address ride the public payload — the
+    // landing page renders them for anonymous visitors, unlike the album.
+    #[test]
+    fn the_public_payload_carries_all_three_about_sections_and_the_address() {
+        let payload = PublicSiteContent {
+            hero_title: "Dulac My Camp".into(),
+            hero_subtitle: "On the bayou".into(),
+            about_camp_text: "A camp.".into(),
+            about_dulac_text: "A town.".into(),
+            last_island_text: "An island.".into(),
+            camp_address: Some("29.3802, -90.7148".into()),
+            hero_image_url: None,
+            rules: vec![],
+            amenities: vec![],
+            gallery: vec![],
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+
+        assert_eq!(json["about_camp_text"], "A camp.");
+        assert_eq!(json["about_dulac_text"], "A town.");
+        assert_eq!(json["last_island_text"], "An island.");
+        assert_eq!(json["camp_address"], "29.3802, -90.7148");
+        // The old single blurb is gone, not merely renamed alongside.
+        assert!(!json.as_object().unwrap().contains_key("about_text"));
     }
 
     #[test]

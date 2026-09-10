@@ -143,7 +143,16 @@ export interface Holiday {
 export interface SiteContent {
   hero_title: string;
   hero_subtitle: string;
-  about_text: string;
+  /** The three About stories, each its own section on the landing page. */
+  about_camp_text: string;
+  about_dulac_text: string;
+  last_island_text: string;
+  /**
+   * A street address, or a bare "lat,lng" pair. Passed verbatim to Google
+   * Maps as a directions destination, which accepts either. Null or blank
+   * means no address is set, and the address and button are both omitted.
+   */
+  camp_address: string | null;
   hero_image_url: string | null;
   rules: { id: string; text: string }[];
   amenities: { id: string; label: string; icon: string | null }[];
@@ -184,7 +193,10 @@ export interface ContentAccessSection {
 export interface SiteSettingsAdmin {
   hero_title: string;
   hero_subtitle: string;
-  about_text: string;
+  about_camp_text: string;
+  about_dulac_text: string;
+  last_island_text: string;
+  camp_address: string | null;
   hero_image_url: string | null;
   guest_photos_url: string | null;
 }
