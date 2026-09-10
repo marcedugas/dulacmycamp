@@ -6,10 +6,13 @@ import {
   CalendarDays,
   CheckCircle2,
   Image as ImageIcon,
+  MapPin,
+  Navigation,
   PartyPopper,
   XCircle,
 } from 'lucide-react';
 import { buildIndex } from '../components/CampCalendar';
+import { Lightbox } from '../components/Lightbox';
 import {
   FishingWidget,
   LunarWidget,
@@ -155,6 +158,35 @@ function UpcomingEvents() {
   );
 }
 
+/**
+ * The camp's location and a directions link, or nothing at all when no
+ * address is set — an empty address means no text and no button, not an
+ * empty state.
+ *
+ * Google Maps takes the destination as a plain query parameter and accepts a
+ * street address and a bare "lat,lng" pair interchangeably, so whatever the
+ * admin typed goes through url-encoded and unparsed. No key, no SDK.
+ */
+function Directions({ address }: { address: string | null }) {
+  const trimmed = address?.trim();
+  if (!trimmed) return null;
+
+  const href = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(trimmed)}`;
+  return (
+    <Card className="mt-6 flex flex-wrap items-center justify-between gap-3">
+      <p className="flex items-center gap-2 text-sm font-semibold text-charcoal">
+        <MapPin size={16} className="shrink-0 text-forest-600" />
+        {trimmed}
+      </p>
+      <a href={href} target="_blank" rel="noreferrer noopener">
+        <Button size="sm" variant="secondary">
+          <Navigation size={14} /> Get Directions
+        </Button>
+      </a>
+    </Card>
+  );
+}
+
 export default function Landing() {
   const { data: config } = useConfig();
   const { data: content, isLoading } = useSiteContent();
@@ -165,10 +197,16 @@ export default function Landing() {
   const heroTitle = content?.hero_title ?? DEFAULT_HERO_TITLE;
   const heroSubtitle = content?.hero_subtitle ?? DEFAULT_HERO_SUBTITLE;
   const heroImageUrl = assetUrl(content?.hero_image_url);
-  const aboutText = content?.about_text?.trim();
+  const aboutCamp = content?.about_camp_text?.trim();
   const rules = content?.rules ?? [];
   const amenities = content?.amenities ?? [];
   const gallery = content?.gallery ?? [];
+  const aboutDulac = content?.about_dulac_text?.trim();
+  const lastIsland = content?.last_island_text?.trim();
+  const campAddress = content?.camp_address ?? null;
+
+  // Which gallery photo the lightbox is showing; null when it's closed.
+  const [lightbox, setLightbox] = useState<number | null>(null);
 
   return (
     <>
@@ -219,7 +257,7 @@ export default function Landing() {
       <Section
         title="About the camp"
         subtitle={
-          aboutText ||
+          aboutCamp ||
           `Family and friends only. The camp sleeps ${config?.capacity_adults ?? 10} adults comfortably — more with kids on the bunks.`
         }
         id="about"
@@ -248,10 +286,13 @@ export default function Landing() {
         <div className="mt-6">
           {gallery.length > 0 ? (
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              {gallery.map((g) => (
-                <figure
+              {gallery.map((g, i) => (
+                <button
                   key={g.id}
-                  className="group relative aspect-4/3 overflow-hidden rounded-xl border border-sand bg-cream-dark/60"
+                  type="button"
+                  onClick={() => setLightbox(i)}
+                  aria-label={g.caption ? `View ${g.caption}` : 'View photo'}
+                  className="group relative aspect-4/3 cursor-zoom-in overflow-hidden rounded-xl border border-sand bg-cream-dark/60"
                 >
                   <img
                     src={assetUrl(g.url) ?? undefined}
@@ -263,7 +304,7 @@ export default function Landing() {
                       {g.caption}
                     </figcaption>
                   )}
-                </figure>
+                </button>
               ))}
             </div>
           ) : (
@@ -275,7 +316,33 @@ export default function Landing() {
             )
           )}
         </div>
+
+        <Directions address={campAddress} />
       </Section>
+
+      {/* The town, then the island it lost. Both hidden until an admin
+          writes them — an empty heading over nothing helps no one. */}
+      {aboutDulac && (
+        <div className="bg-cream-dark/50">
+          <Section title="About Dulac" id="about-dulac">
+            <Card>
+              <p className="whitespace-pre-wrap text-sm leading-relaxed text-charcoal">
+                {aboutDulac}
+              </p>
+            </Card>
+          </Section>
+        </div>
+      )}
+
+      {lastIsland && (
+        <Section title="Last Island" id="last-island">
+          <Card>
+            <p className="whitespace-pre-wrap text-sm leading-relaxed text-charcoal">
+              {lastIsland}
+            </p>
+          </Card>
+        </Section>
+      )}
 
       <div className="bg-cream-dark/50">
         <Section title="House rules" subtitle="Short list. Leave it better than you found it.">
@@ -330,6 +397,13 @@ export default function Landing() {
           </div>
         </Section>
       </div>
+
+      <Lightbox
+        photos={gallery}
+        index={lightbox}
+        onClose={() => setLightbox(null)}
+        onNavigate={setLightbox}
+      />
     </>
   );
 }

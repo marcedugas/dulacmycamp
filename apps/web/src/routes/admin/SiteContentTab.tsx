@@ -31,7 +31,10 @@ function SettingsSection({ content }: { content: SiteSettingsAdmin | undefined }
   const [form, setForm] = useState({
     hero_title: '',
     hero_subtitle: '',
-    about_text: '',
+    about_camp_text: '',
+    about_dulac_text: '',
+    last_island_text: '',
+    camp_address: '',
     guest_photos_url: '',
   });
 
@@ -42,7 +45,10 @@ function SettingsSection({ content }: { content: SiteSettingsAdmin | undefined }
     setForm({
       hero_title: content.hero_title,
       hero_subtitle: content.hero_subtitle,
-      about_text: content.about_text,
+      about_camp_text: content.about_camp_text,
+      about_dulac_text: content.about_dulac_text,
+      last_island_text: content.last_island_text,
+      camp_address: content.camp_address ?? '',
       guest_photos_url: content.guest_photos_url ?? '',
     });
     setSeeded(true);
@@ -148,18 +154,70 @@ function SettingsSection({ content }: { content: SiteSettingsAdmin | undefined }
         </div>
       </Card>
 
+      {/* Three separate stories, each its own section on the landing page.
+          Each card saves on its own, matching the hero/guest-photos cards. */}
       <Card>
-        <h3 className="mb-4 font-bold text-charcoal">About</h3>
-        <Field label="About text" hint="Shown under the 'About the camp' heading on the landing page.">
+        <h3 className="mb-4 font-bold text-charcoal">About the Camp</h3>
+        <Field
+          label="About the camp"
+          hint="The camp itself — what it is, who it's for, any background worth knowing."
+        >
           <Textarea
-            rows={4}
-            value={form.about_text}
-            onChange={(e) => setForm((f) => ({ ...f, about_text: e.target.value }))}
+            rows={5}
+            value={form.about_camp_text}
+            onChange={(e) => setForm((f) => ({ ...f, about_camp_text: e.target.value }))}
+          />
+        </Field>
+        <div className="mt-4">
+          <Field
+            label="Camp address"
+            hint="A street address, or just coordinates like '29.3802, -90.7148' if there's no clean mailing address for this location. Shown with a Get Directions button in this section. Leave blank to show neither."
+          >
+            <Input
+              value={form.camp_address}
+              placeholder="29.3802, -90.7148"
+              onChange={(e) => setForm((f) => ({ ...f, camp_address: e.target.value }))}
+            />
+          </Field>
+        </div>
+        <div className="mt-4 flex justify-end">
+          <Button size="sm" disabled={save.isPending} onClick={() => save.mutate(form)}>
+            {save.isPending ? 'Saving…' : 'Save About the Camp'}
+          </Button>
+        </div>
+      </Card>
+
+      <Card>
+        <h3 className="mb-4 font-bold text-charcoal">About Dulac</h3>
+        <Field label="About Dulac" hint="A short history or story of the town itself.">
+          <Textarea
+            rows={5}
+            value={form.about_dulac_text}
+            onChange={(e) => setForm((f) => ({ ...f, about_dulac_text: e.target.value }))}
           />
         </Field>
         <div className="mt-4 flex justify-end">
           <Button size="sm" disabled={save.isPending} onClick={() => save.mutate(form)}>
-            {save.isPending ? 'Saving…' : 'Save about text'}
+            {save.isPending ? 'Saving…' : 'Save About Dulac'}
+          </Button>
+        </div>
+      </Card>
+
+      <Card>
+        <h3 className="mb-4 font-bold text-charcoal">Last Island</h3>
+        <Field
+          label="Last Island"
+          hint="The history of Last Island (Isle Dernière) and the 1856 hurricane."
+        >
+          <Textarea
+            rows={5}
+            value={form.last_island_text}
+            onChange={(e) => setForm((f) => ({ ...f, last_island_text: e.target.value }))}
+          />
+        </Field>
+        <div className="mt-4 flex justify-end">
+          <Button size="sm" disabled={save.isPending} onClick={() => save.mutate(form)}>
+            {save.isPending ? 'Saving…' : 'Save Last Island'}
           </Button>
         </div>
       </Card>
