@@ -270,6 +270,38 @@ pub fn booking_confirmed_to_guest(
     (subject, layout("Booking confirmed", &body, &actions), text)
 }
 
+/// Sent when an admin corrects the guest counts on a booking the guest
+/// already submitted. Shows the new figures, since the whole point is that
+/// what they submitted is not what now stands.
+pub fn booking_guests_updated_to_guest(b: &Booking, app_url: &str) -> Email {
+    let subject = "Your booking's guest count was updated — Dulac My Camp".to_string();
+    // Shared with the in-app notification so the two can never word it differently.
+    let counts = crate::bookings::guest_count_phrase(b.guest_count_adults, b.guest_count_kids);
+    let body = format!(
+        r#"<p style="margin:0 0 14px;">The camp updated the guest count on your stay for <strong>{} &rarr; {}</strong>.</p>
+<p style="margin:0 0 14px;">It now reads <strong>{}</strong>. Nothing else about your booking changed &mdash; same dates, same status.</p>
+<p style="margin:0;">If that isn't right, just reply and we'll sort it out.</p>"#,
+        pretty(b.check_in),
+        pretty(b.check_out),
+        esc(&counts)
+    );
+    let actions = format!(
+        r#"<table role="presentation" cellpadding="0" cellspacing="0" style="margin:22px 0 4px;"><tr>{}</tr></table>"#,
+        button("View my bookings", &format!("{app_url}/my-bookings"), GREEN)
+    );
+    let text = format!(
+        "Guest count updated\n\nThe camp updated the guest count on your stay for {} - {}. It now reads {}. Nothing else about your booking changed - same dates, same status.\n\nIf that isn't right, just reply and we'll sort it out.\n\n{app_url}/my-bookings\n",
+        pretty(b.check_in),
+        pretty(b.check_out),
+        counts
+    );
+    (
+        subject,
+        layout("Guest count updated", &body, &actions),
+        text,
+    )
+}
+
 pub fn booking_denied_to_guest(b: &Booking, reason: Option<&str>, app_url: &str) -> Email {
     let subject = "Booking update — Dulac My Camp".to_string();
     let reason_html = reason

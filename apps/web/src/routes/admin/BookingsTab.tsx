@@ -2,10 +2,11 @@ import { useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { addDays, format } from 'date-fns';
 import { toast } from 'sonner';
-import { Check, CheckCircle2, Dog, Flag, Plus, Trash2, TriangleAlert, X } from 'lucide-react';
+import { Check, CheckCircle2, Dog, Flag, Plus, Trash2, TriangleAlert, Users, X } from 'lucide-react';
 import {
   Button,
   Card,
+  CountInput,
   EmptyState,
   Field,
   Input,
@@ -193,20 +194,20 @@ function AddBookingModal({
 
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Adults">
-              <Input
-                type="number"
+              <CountInput
                 min={1}
                 required
+                max={30}
                 value={adults}
-                onChange={(e) => setAdults(Number(e.target.value))}
+                onChange={setAdults}
               />
             </Field>
             <Field label="Kids">
-              <Input
-                type="number"
+              <CountInput
                 min={0}
+                max={30}
                 value={kids}
-                onChange={(e) => setKids(Number(e.target.value))}
+                onChange={setKids}
               />
             </Field>
           </div>
@@ -239,6 +240,74 @@ function AddBookingModal({
   );
 }
 
+/**
+ * Corrects the adult/kid counts on a booking a guest already submitted — the
+ * guest can't change them after the fact, so this is how a wrong number gets
+ * fixed. Works on any status. The guest is emailed only if a number actually
+ * moves; re-saving the same figures is silent.
+ */
+function EditGuestsModal({
+  booking,
+  onClose,
+  onSaved,
+}: {
+  booking: Booking;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [adults, setAdults] = useState(booking.guest_count_adults);
+  const [kids, setKids] = useState(booking.guest_count_kids);
+  const unchanged = adults === booking.guest_count_adults && kids === booking.guest_count_kids;
+
+  const save = useMutation({
+    mutationFn: () =>
+      api(`/bookings/${booking.id}/guests`, {
+        method: 'PUT',
+        body: { guest_count_adults: adults, guest_count_kids: kids },
+      }),
+    onSuccess: () => {
+      toast.success('Guest count updated. The guest has been emailed the new numbers.');
+      onSaved();
+      onClose();
+    },
+    onError: (err: unknown) =>
+      toast.error(err instanceof ApiError ? err.message : 'Could not update the guest count.'),
+  });
+
+  return (
+    <Modal open onClose={onClose} title="Edit guest count">
+      <div className="space-y-4">
+        <p className="text-sm text-charcoal">
+          <strong>{booking.guest_name ?? booking.guest_email}</strong>,{' '}
+          {formatRange(booking.check_in, booking.check_out)}. Only the counts change &mdash; dates
+          and status stay as they are.
+        </p>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="Adults">
+            <CountInput min={1} max={30} value={adults} onChange={setAdults} />
+          </Field>
+          <Field label="Kids">
+            <CountInput min={0} max={30} value={kids} onChange={setKids} />
+          </Field>
+        </div>
+        <p className="text-xs text-muted">
+          {unchanged
+            ? 'No change yet — the guest is only emailed if a number actually moves.'
+            : 'The guest will be emailed the corrected numbers.'}
+        </p>
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" type="button" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="button" disabled={save.isPending || unchanged} onClick={() => save.mutate()}>
+            {save.isPending ? 'Saving…' : 'Save'}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 export default function BookingsTab() {
   const { data, isLoading } = useBookings();
   const queryClient = useQueryClient();
@@ -251,6 +320,7 @@ export default function BookingsTab() {
   const [details, setDetails] = useState<Booking | null>(null);
   const [viewingCheckout, setViewingCheckout] = useState<Booking | null>(null);
   const [deleting, setDeleting] = useState<Booking | null>(null);
+  const [editingGuests, setEditingGuests] = useState<Booking | null>(null);
   const [adding, setAdding] = useState(false);
   const { data: checkouts } = useAdminCheckouts();
   const checkoutDetail: AdminCheckout | undefined = viewingCheckout
@@ -456,6 +526,16 @@ export default function BookingsTab() {
                         <Button size="sm" variant="ghost" onClick={() => setDetails(b)}>
                           Details
                         </Button>
+                        {/* Any status: this corrects what was submitted, it is
+                            not a state change. */}
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          title="Correct the adult/kid count"
+                          onClick={() => setEditingGuests(b)}
+                        >
+                          <Users size={14} /> Guests
+                        </Button>
                         {(b.status === 'approved' || b.status === 'pending') && (
                           <Button
                             size="sm"
@@ -628,6 +708,16 @@ export default function BookingsTab() {
           </div>
         </div>
       </Modal>
+
+      {editingGuests && (
+        <EditGuestsModal
+          // Fresh counts for each booking opened, never the last one's.
+          key={editingGuests.id}
+          booking={editingGuests}
+          onClose={() => setEditingGuests(null)}
+          onSaved={invalidate}
+        />
+      )}
 
       <AddBookingModal open={adding} onClose={() => setAdding(false)} onCreated={invalidate} />
     </>

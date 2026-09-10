@@ -563,6 +563,117 @@ pub async fn admin_create(
     Ok(Json(create_booking_for(&state, &guest, body.into()).await?))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UpdateGuests {
+    pub guest_count_adults: i32,
+    pub guest_count_kids: i32,
+}
+
+/// Whether a proposed guest count is one the `bookings` CHECK constraints
+/// will accept — `valid_adults` (> 0) and `valid_kids` (>= 0) in
+/// `0001_core.sql`. Checked here so a bad number comes back as a plain
+/// message instead of a constraint violation.
+fn validate_guest_counts(adults: i32, kids: i32) -> ApiResult<()> {
+    if adults < 1 {
+        return Err(AppError::BadRequest(
+            "A booking needs at least one adult.".into(),
+        ));
+    }
+    if kids < 0 {
+        return Err(AppError::BadRequest("Kids can't be negative.".into()));
+    }
+    Ok(())
+}
+
+/// "2 adults", "1 adult and 1 kid", "3 adults and 2 kids" — kids omitted
+/// when there are none, so a notification never reads "and 0 kids".
+pub(crate) fn guest_count_phrase(adults: i32, kids: i32) -> String {
+    let adults = format!("{adults} {}", if adults == 1 { "adult" } else { "adults" });
+    match kids {
+        0 => adults,
+        1 => format!("{adults} and 1 kid"),
+        n => format!("{adults} and {n} kids"),
+    }
+}
+
+/// Whether the guest is worth emailing about this edit — i.e. whether the
+/// numbers actually moved. Re-saving the same figures is a no-op and should
+/// stay silent rather than telling someone their booking changed when it did
+/// not.
+fn guest_counts_changed(before: (i32, i32), after: (i32, i32)) -> bool {
+    before != after
+}
+
+/// `PUT /api/bookings/{id}/guests` — admin only.
+///
+/// A data-correction tool, deliberately not gated on status the way the
+/// delete is: the reason it exists is that a guest submitted the wrong number
+/// and cannot fix it themselves, and that is just as true of an approved stay
+/// as a pending request. Only the counts move — dates, status, and everything
+/// else are left exactly as they were.
+///
+/// The guest is emailed when the numbers actually change, matching how every
+/// other admin action on a booking announces itself. A no-op save says
+/// nothing.
+pub async fn admin_update_guests(
+    State(state): State<Shared>,
+    AdminUser(admin): AdminUser,
+    Path(id): Path<Uuid>,
+    Json(body): Json<UpdateGuests>,
+) -> ApiResult<Json<BookingView>> {
+    validate_guest_counts(body.guest_count_adults, body.guest_count_kids)?;
+
+    let row = load_row(&state.db, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Booking not found.".into()))?;
+
+    let before = (row.booking.guest_count_adults, row.booking.guest_count_kids);
+    let after = (body.guest_count_adults, body.guest_count_kids);
+
+    let booking = sqlx::query_as::<_, Booking>(&format!(
+        "UPDATE bookings SET guest_count_adults = $2, guest_count_kids = $3, updated_at = now()
+         WHERE id = $1 RETURNING {BOOKING_COLUMNS}"
+    ))
+    .bind(id)
+    .bind(body.guest_count_adults)
+    .bind(body.guest_count_kids)
+    .fetch_one(&state.db)
+    .await?;
+
+    if guest_counts_changed(before, after) {
+        email::spawn(
+            state.clone(),
+            row.guest_email.clone(),
+            email_templates::booking_guests_updated_to_guest(&booking, app_url(&state)),
+        );
+        notifications::system_message(
+            &state.db,
+            booking.user_id,
+            "Guest count updated",
+            &format!(
+                "The camp updated your stay {} – {} to {}.",
+                booking.check_in.format("%b %-d"),
+                booking.check_out.format("%b %-d, %Y"),
+                guest_count_phrase(booking.guest_count_adults, booking.guest_count_kids)
+            ),
+            Some(booking.id),
+        )
+        .await?;
+
+        tracing::info!(
+            booking_id = %id,
+            from = ?before,
+            to = ?after,
+            "booking guest counts corrected",
+        );
+    }
+
+    let updated = load_row(&state.db, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Booking not found.".into()))?;
+    Ok(Json(updated.to_view(Some(&admin))))
+}
+
 // ─────────────────────────── state transitions ───────────────────────────
 
 /// Applies an approval and fires the guest notifications.
@@ -1067,6 +1178,45 @@ mod tests {
     // test guards against.
     // The gate that keeps confirmed history from being erased. `approved` is
     // the only status this must ever refuse, and the only one it does.
+    // The silence rule: re-saving the same numbers must not tell a guest
+    // their booking changed.
+    #[test]
+    fn the_guest_count_phrase_pluralises_and_drops_zero_kids() {
+        assert_eq!(guest_count_phrase(2, 0), "2 adults");
+        assert_eq!(guest_count_phrase(1, 0), "1 adult");
+        assert_eq!(guest_count_phrase(3, 1), "3 adults and 1 kid");
+        assert_eq!(guest_count_phrase(1, 4), "1 adult and 4 kids");
+    }
+
+    #[test]
+    fn re_saving_the_same_counts_notifies_nobody() {
+        assert!(!guest_counts_changed((2, 1), (2, 1)));
+        assert!(!guest_counts_changed((4, 0), (4, 0)));
+    }
+
+    #[test]
+    fn moving_either_count_notifies_the_guest() {
+        assert!(guest_counts_changed((2, 1), (3, 1)));
+        assert!(guest_counts_changed((2, 1), (2, 0)));
+        assert!(guest_counts_changed((2, 1), (5, 4)));
+    }
+
+    // Mirrors `valid_adults` / `valid_kids` in 0001_core.sql, so a bad number
+    // is a message rather than a constraint violation.
+    #[test]
+    fn guest_counts_must_satisfy_the_database_constraints() {
+        assert!(validate_guest_counts(1, 0).is_ok());
+        assert!(validate_guest_counts(12, 6).is_ok());
+        assert!(matches!(
+            validate_guest_counts(0, 2),
+            Err(AppError::BadRequest(_))
+        ));
+        assert!(matches!(
+            validate_guest_counts(2, -1),
+            Err(AppError::BadRequest(_))
+        ));
+    }
+
     #[test]
     fn an_approved_booking_cannot_be_deleted() {
         assert!(!is_deletable_status("approved"));

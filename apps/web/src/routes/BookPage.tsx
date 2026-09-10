@@ -5,7 +5,7 @@ import { addDays } from 'date-fns';
 import { toast } from 'sonner';
 import { CheckCircle2, Fish, Info, Lock, TriangleAlert, Users } from 'lucide-react';
 import { buildIndex } from '../components/CampCalendar';
-import { Button, Card, Field, Input, PageHeader, Textarea, cx } from '../components/ui';
+import { Button, Card, CountInput, Field, Input, PageHeader, Textarea, cx } from '../components/ui';
 import { api, ApiError } from '../lib/api';
 import { useCalendarData } from '../lib/queries';
 import { daysInclusive, formatRange, nightCount, parseDay, pluralNights, toKey } from '../lib/dates';
@@ -199,23 +199,10 @@ export default function BookPage() {
 
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Adults">
-              <Input
-                type="number"
-                min={1}
-                max={30}
-                required
-                value={adults}
-                onChange={(e) => setAdults(Math.max(1, Number(e.target.value) || 1))}
-              />
+              <CountInput min={1} max={30} required value={adults} onChange={setAdults} />
             </Field>
             <Field label="Kids">
-              <Input
-                type="number"
-                min={0}
-                max={30}
-                value={kids}
-                onChange={(e) => setKids(Math.max(0, Number(e.target.value) || 0))}
-              />
+              <CountInput min={0} max={30} value={kids} onChange={setKids} />
             </Field>
           </div>
 
