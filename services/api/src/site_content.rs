@@ -204,40 +204,6 @@ pub async fn get_settings_admin(
 
 // ─────────────────────── guest photos link ───────────────────────
 
-/// Whether one booking, by status alone, grants access to the photo album.
-///
-/// Deliberately looser than [`crate::checkin_info::has_access`], and the two
-/// must not be conflated: check-in info is operational (the key location, the
-/// wifi code) and stops the moment a stay is checked out, whereas the album is
-/// a communal keepsake. Someone who stayed at the camp helped make it, so
-/// their access does not expire — not when they check out, and not when the
-/// stay recedes into the past. Dates are irrelevant here for the same reason.
-fn grants_photos_access(status: &str) -> bool {
-    status == "approved"
-}
-
-/// Whether *any* of a user's bookings grants album access. Pure mirror of the
-/// `EXISTS` query in [`has_photos_access`] — kept here as the tested,
-/// documented spec of the rule.
-pub fn has_access(statuses: &[&str]) -> bool {
-    statuses.iter().any(|status| grants_photos_access(status))
-}
-
-/// Whether `user_id` may see the album. See [`has_access`] for the rule; this
-/// evaluates it as one SQL `EXISTS` rather than pulling every booking into
-/// Rust to fold over.
-async fn has_photos_access(db: &PgPool, user_id: Uuid) -> Result<bool, sqlx::Error> {
-    let (allowed,): (bool,) = sqlx::query_as(
-        "SELECT EXISTS(
-            SELECT 1 FROM bookings WHERE user_id = $1 AND status = 'approved'
-         )",
-    )
-    .bind(user_id)
-    .fetch_one(db)
-    .await?;
-    Ok(allowed)
-}
-
 #[derive(Debug, Serialize)]
 pub struct GuestPhotosLink {
     /// `None` when no admin has set a link yet — a normal state for an
@@ -245,19 +211,27 @@ pub struct GuestPhotosLink {
     pub url: Option<String>,
 }
 
-/// `GET /api/guest-photos-link` — the album link, for anyone who has stayed.
+/// `GET /api/guest-photos-link` — the album link.
 ///
-/// 403 for a guest with no approved booking rather than `{ "url": null }`,
-/// matching [`crate::checkin_info::list_for_guest`]: null already means
-/// "nobody has set one yet", and one shape cannot carry both answers without
-/// the frontend guessing which it got.
+/// Who gets in is configuration, not code: [`crate::content_access`] holds the
+/// rule for [`crate::content_access::GUEST_PHOTOS`], which ships open to the
+/// `user` (family) role and to anyone with an ever-approved booking. A family
+/// member who has never booked and a guest who stayed last summer both belong
+/// here, by different routes.
+///
+/// 403 rather than `{ "url": null }` for someone not admitted, matching
+/// [`crate::checkin_info::list_for_guest`]: null already means "nobody has set
+/// one yet", and one shape cannot carry both answers without the frontend
+/// guessing which it got.
 pub async fn guest_photos_link(
     State(state): State<Shared>,
     AuthUser(user): AuthUser,
 ) -> ApiResult<Json<GuestPhotosLink>> {
-    if !has_photos_access(&state.db, user.id).await? {
+    if !crate::content_access::user_may_view(&state.db, crate::content_access::GUEST_PHOTOS, &user)
+        .await?
+    {
         return Err(AppError::Forbidden(
-            "The camp photo album is for guests who have stayed with us.".into(),
+            "The camp photo album is for family and guests who have stayed with us.".into(),
         ));
     }
 
@@ -691,32 +665,6 @@ mod tests {
         // The rest of the landing page still arrives.
         assert!(object.contains_key("hero_title"));
         assert!(object.contains_key("gallery"));
-    }
-
-    #[test]
-    fn a_guest_with_no_approved_booking_is_turned_away() {
-        assert!(!has_access(&[]));
-        assert!(!has_access(&["pending"]));
-        assert!(!has_access(&["denied"]));
-        assert!(!has_access(&["cancelled"]));
-        assert!(!has_access(&["pending", "denied", "cancelled"]));
-    }
-
-    #[test]
-    fn one_approved_booking_is_enough() {
-        assert!(has_access(&["approved"]));
-        assert!(has_access(&["denied", "approved", "pending"]));
-    }
-
-    // The point of difference from check-in info, spelled out so the two
-    // rules cannot be quietly merged later. Album access is decided by
-    // status alone: no date, no checkout state, nothing that expires.
-    #[test]
-    fn a_completed_past_stay_still_grants_album_access() {
-        // `crate::checkin_info::has_access` says false for this same guest,
-        // whose only approved booking has been checked out.
-        assert!(!crate::checkin_info::has_access(&[("approved", true)]));
-        assert!(has_access(&["approved"]));
     }
 
     #[test]

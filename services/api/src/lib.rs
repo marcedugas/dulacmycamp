@@ -10,6 +10,7 @@ pub mod bookings;
 pub mod checkin_info;
 pub mod checklist;
 pub mod checkout;
+pub mod content_access;
 pub mod email;
 pub mod email_templates;
 pub mod events;
@@ -250,6 +251,12 @@ pub fn router(state: Shared) -> Router {
         // The album link is not part of the public payload above — it is for
         // people who have actually stayed. See `site_content::has_access`.
         .route("/guest-photos-link", get(site_content::guest_photos_link))
+        // ── who can see what ──
+        .route("/admin/content-access", get(content_access::list_admin))
+        .route(
+            "/admin/content-access/{section_key}",
+            put(content_access::update_admin),
+        )
         .route(
             "/admin/site-content/settings",
             get(site_content::get_settings_admin).put(site_content::update_settings),

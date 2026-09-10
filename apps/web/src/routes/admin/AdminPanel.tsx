@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { PageHeader, cx } from '../../components/ui';
 import { useJournalPendingCount } from '../../lib/queries';
 import { InboxView } from '../Inbox';
+import AccessTab from './AccessTab';
 import BookingsTab from './BookingsTab';
 import BlackoutTab from './BlackoutTab';
 import CheckinInfoTab from './CheckinInfoTab';
@@ -20,6 +21,7 @@ const TABS = [
   'Journal',
   'Site Content',
   'Users',
+  'Access',
   'Messages',
 ] as const;
 type Tab = (typeof TABS)[number];
@@ -55,6 +57,7 @@ export default function AdminPanel() {
         ))}
       </div>
 
+      {tab === 'Access' && <AccessTab />}
       {tab === 'Bookings' && <BookingsTab />}
       {tab === 'Blackout Dates' && <BlackoutTab />}
       {tab === 'Events' && <EventsTab />}
