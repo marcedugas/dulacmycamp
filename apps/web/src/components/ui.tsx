@@ -1,5 +1,5 @@
 import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode, TextareaHTMLAttributes } from 'react';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import type { BookingStatus, JournalStatus } from '../lib/types';
@@ -109,6 +109,76 @@ const CONTROL =
 
 export function Input({ className, ...rest }: InputHTMLAttributes<HTMLInputElement>) {
   return <input className={cx(CONTROL, className)} {...rest} />;
+}
+
+/**
+ * A whole-number field that lets you empty it while you are still typing.
+ *
+ * The obvious version — `onChange={(e) => set(Number(e.target.value) || min)}`
+ * — cannot hold an empty string: clearing the box makes `Number('')` zero,
+ * the `|| min` turns that into the minimum, and the field refills itself
+ * under the cursor. On a desktop that is easy to miss, because selecting the
+ * contents and overtyping replaces everything in one event and never passes
+ * through empty. On a phone people backspace digit by digit, so they hit it
+ * every time: clearing "10" to type "2" leaves a stubborn "1" behind and you
+ * end up with "12".
+ *
+ * So the draft string is what the person sees, and it is allowed to be empty
+ * or half-finished. A value only reaches the parent when it parses inside the
+ * range, and the draft is clamped to a real integer on blur.
+ */
+export function CountInput({
+  value,
+  onChange,
+  min,
+  max,
+  className,
+  ...rest
+}: {
+  value: number;
+  onChange: (next: number) => void;
+  min: number;
+  max: number;
+} & Omit<InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange' | 'min' | 'max' | 'type'>) {
+  const [draft, setDraft] = useState(String(value));
+  const [editing, setEditing] = useState(false);
+
+  // Follow the value when it changes from outside — but never while someone
+  // is mid-edit, which is the whole bug this component exists to avoid.
+  useEffect(() => {
+    if (!editing) setDraft(String(value));
+  }, [value, editing]);
+
+  const clamp = (n: number) => Math.min(max, Math.max(min, n));
+
+  return (
+    <input
+      type="number"
+      // Phones show the plain digit pad rather than the full keyboard.
+      inputMode="numeric"
+      min={min}
+      max={max}
+      className={cx(CONTROL, className)}
+      value={draft}
+      onFocus={() => setEditing(true)}
+      onChange={(e) => {
+        const next = e.target.value;
+        setDraft(next);
+        // Empty and out-of-range drafts are legitimate mid-edit states; they
+        // simply don't propagate until they mean something.
+        const parsed = Number.parseInt(next, 10);
+        if (String(parsed) === next.trim() && parsed >= min && parsed <= max) onChange(parsed);
+      }}
+      onBlur={() => {
+        setEditing(false);
+        const parsed = Number.parseInt(draft, 10);
+        const settled = Number.isNaN(parsed) ? min : clamp(parsed);
+        setDraft(String(settled));
+        if (settled !== value) onChange(settled);
+      }}
+      {...rest}
+    />
+  );
 }
 
 export function Textarea({ className, ...rest }: TextareaHTMLAttributes<HTMLTextAreaElement>) {

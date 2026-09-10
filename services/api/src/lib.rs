@@ -221,6 +221,9 @@ pub fn router(state: Shared) -> Router {
             "/bookings/{id}",
             get(bookings::get_one).delete(bookings::admin_delete),
         )
+        // Correcting what a guest submitted, not a state change — see
+        // `bookings::admin_update_guests`.
+        .route("/bookings/{id}/guests", put(bookings::admin_update_guests))
         .route("/bookings/{id}/approve", put(bookings::admin_approve))
         .route("/bookings/{id}/deny", put(bookings::admin_deny))
         // Admin entering a booking on a guest's behalf (phone call, in
