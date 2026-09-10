@@ -11,6 +11,7 @@ import type {
   ChecklistItem,
   CheckoutEligibleBooking,
   GalleryPhoto,
+  GuestPhotosLink,
   Holiday,
   JournalEligibleBooking,
   JournalEntry,
@@ -19,6 +20,7 @@ import type {
   PublicJournalPage,
   RuleItem,
   SiteContent,
+  SiteSettingsAdmin,
   SpecialEvent,
   UserWithStats,
 } from './types';
@@ -98,6 +100,33 @@ export function useSiteContent() {
   return useQuery({
     queryKey: ['site-content'],
     queryFn: () => api<SiteContent>('/site-content', { anonymous: true }),
+  });
+}
+
+/**
+ * The camp photo album link. 403s for anyone without an approved booking —
+ * treated as "not eligible" rather than an error, the same way
+ * {@link useCheckinInfo} treats its own gate, since it is an ordinary state
+ * for a visitor who has never stayed.
+ */
+export function useGuestPhotosLink() {
+  return useQuery({
+    queryKey: ['guest-photos-link'],
+    queryFn: () => api<GuestPhotosLink>('/guest-photos-link'),
+    // A 403 is a settled answer, not a blip — retrying just delays it.
+    retry: false,
+  });
+}
+
+/**
+ * Admin-only read of the editable settings, including `guest_photos_url`.
+ * The Site Content tab seeds its form from this rather than the public
+ * payload, which no longer carries the album link.
+ */
+export function useSiteSettingsAdmin() {
+  return useQuery({
+    queryKey: ['admin-site-settings'],
+    queryFn: () => api<SiteSettingsAdmin>('/admin/site-content/settings'),
   });
 }
 

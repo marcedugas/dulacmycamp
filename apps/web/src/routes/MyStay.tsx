@@ -1,8 +1,42 @@
 import { Link } from 'react-router-dom';
-import { BookOpen, ClipboardCheck, KeyRound, Tent, Users } from 'lucide-react';
+import { BookOpen, ClipboardCheck, ExternalLink, Images, KeyRound, Tent, Users } from 'lucide-react';
 import { Button, Card, EmptyState, JournalStatusBadge, PageHeader, Spinner } from '../components/ui';
-import { useCheckinInfo, useMyStay } from '../lib/queries';
+import { useCheckinInfo, useGuestPhotosLink, useMyStay } from '../lib/queries';
 import { formatRange, nightCount, pluralNights } from '../lib/dates';
+
+/**
+ * The shared camp album, for guests who have stayed.
+ *
+ * Renders nothing at all when the guest isn't eligible (a 403, which the
+ * query surfaces as an error) or when no admin has set a link yet (a null
+ * url) — the two are different answers but call for the same empty page.
+ */
+function CampPhotos() {
+  const { data } = useGuestPhotosLink();
+  if (!data?.url) return null;
+
+  return (
+    <div className="mt-8">
+      <h2 className="mb-1 flex items-center gap-2 text-xl font-bold text-charcoal">
+        <Images size={20} className="text-forest-600" /> Camp photos
+      </h2>
+      <p className="mb-4 text-sm text-muted">
+        The shared album for everyone who stays here. Add yours, and see what everyone else brought
+        back.
+      </p>
+      <Card>
+        <a
+          href={data.url}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="inline-flex items-center gap-1.5 text-sm font-semibold text-forest-700 hover:text-forest-800 hover:underline"
+        >
+          Add your photos / see everyone's <ExternalLink size={14} />
+        </a>
+      </Card>
+    </div>
+  );
+}
 
 export default function MyStay() {
   const { data: stay, isLoading: stayLoading } = useMyStay();
@@ -97,6 +131,8 @@ export default function MyStay() {
           )}
         </div>
       )}
+
+      <CampPhotos />
     </div>
   );
 }

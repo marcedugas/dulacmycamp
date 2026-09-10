@@ -247,9 +247,12 @@ pub fn router(state: Shared) -> Router {
         .route("/holidays", get(holidays::list))
         // ── site content ──
         .route("/site-content", get(site_content::get_site_content))
+        // The album link is not part of the public payload above — it is for
+        // people who have actually stayed. See `site_content::has_access`.
+        .route("/guest-photos-link", get(site_content::guest_photos_link))
         .route(
             "/admin/site-content/settings",
-            put(site_content::update_settings),
+            get(site_content::get_settings_admin).put(site_content::update_settings),
         )
         .route(
             "/admin/site-content/hero-image",
