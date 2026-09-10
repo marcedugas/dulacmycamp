@@ -1,16 +1,28 @@
+import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { format } from 'date-fns';
 import { toast } from 'sonner';
-import { Crown, ShieldCheck, ShieldOff } from 'lucide-react';
-import { Button, EmptyState, Spinner, cx } from '../../components/ui';
+import { Ban, Crown, RotateCcw, ShieldCheck, ShieldOff, Trash2 } from 'lucide-react';
+import { Button, EmptyState, Modal, Spinner, cx } from '../../components/ui';
 import { api, ApiError } from '../../lib/api';
 import { useUsers } from '../../lib/queries';
 import { useAuth } from '../../lib/auth';
+import type { UserWithStats } from '../../lib/types';
+
+/** Everything a hard delete would destroy. The API refuses the delete unless
+ *  this is zero, so it is also what decides whether the button is offered. */
+function historyCount(u: UserWithStats): number {
+  return u.booking_count + u.journal_count + u.message_count;
+}
 
 export default function UsersTab() {
   const { data, isLoading } = useUsers();
   const { user: me } = useAuth();
   const queryClient = useQueryClient();
+
+  // Blocking is reversible and gets a single click, like the role toggles.
+  // Deleting is not, so it goes through this confirmation first.
+  const [confirmDelete, setConfirmDelete] = useState<UserWithStats | null>(null);
 
   const setRole = useMutation({
     mutationFn: ({ id, role }: { id: string; role: 'guest' | 'admin' }) =>
@@ -38,6 +50,32 @@ export default function UsersTab() {
       toast.error(err instanceof ApiError ? err.message : 'Could not change that owner flag.'),
   });
 
+  const setBlocked = useMutation({
+    mutationFn: ({ id, blocked }: { id: string; blocked: boolean }) =>
+      api(`/users/${id}/${blocked ? 'block' : 'unblock'}`, { method: 'PUT' }),
+    onSuccess: (_data, { blocked }) => {
+      toast.success(
+        blocked
+          ? 'Blocked. Their bookings are untouched — cancel any you also want called off.'
+          : 'Unblocked. They can sign in again.',
+      );
+      void queryClient.invalidateQueries({ queryKey: ['users'] });
+    },
+    onError: (err) =>
+      toast.error(err instanceof ApiError ? err.message : 'Could not change that account.'),
+  });
+
+  const remove = useMutation({
+    mutationFn: (id: string) => api(`/users/${id}`, { method: 'DELETE' }),
+    onSuccess: () => {
+      toast.success('Account deleted.');
+      setConfirmDelete(null);
+      void queryClient.invalidateQueries({ queryKey: ['users'] });
+    },
+    onError: (err) =>
+      toast.error(err instanceof ApiError ? err.message : 'Could not delete that account.'),
+  });
+
   if (isLoading) {
     return (
       <div className="flex justify-center py-20">
@@ -63,7 +101,7 @@ export default function UsersTab() {
       )}
 
       <div className="overflow-x-auto rounded-xl border border-sand bg-white">
-        <table className="w-full min-w-[820px] text-sm">
+        <table className="w-full min-w-[980px] text-sm">
           <thead className="border-b border-sand bg-cream-dark/60 text-left text-xs uppercase tracking-wide text-muted">
             <tr>
               <th className="px-3 py-2.5 font-bold">Name</th>
@@ -78,10 +116,29 @@ export default function UsersTab() {
             {users.map((u) => {
               const isMe = u.id === me?.id;
               const admin = u.role === 'admin';
+              const blocked = u.blocked_at !== null;
+              const history = historyCount(u);
+              // Both server-side rules, mirrored here so the button explains
+              // itself instead of only failing when pressed.
+              const blockable = !admin && !isMe;
+              const deletable = blockable && history === 0;
               return (
-                <tr key={u.id} className="border-b border-sand/70 last:border-0">
+                <tr
+                  key={u.id}
+                  className={cx(
+                    'border-b border-sand/70 last:border-0',
+                    blocked && 'bg-clay/5 text-muted',
+                  )}
+                >
                   <td className="px-3 py-2.5">
-                    <p className="font-semibold text-charcoal">{u.full_name ?? '—'}</p>
+                    <p
+                      className={cx(
+                        'font-semibold',
+                        blocked ? 'text-muted line-through' : 'text-charcoal',
+                      )}
+                    >
+                      {u.full_name ?? '—'}
+                    </p>
                     {u.relationship && <p className="text-xs text-muted">{u.relationship}</p>}
                   </td>
                   <td className="px-3 py-2.5 text-muted">{u.email}</td>
@@ -103,6 +160,14 @@ export default function UsersTab() {
                           title="Receives the booking approve/deny email"
                         >
                           <Crown size={11} /> Owner
+                        </span>
+                      )}
+                      {blocked && (
+                        <span
+                          className="inline-flex items-center gap-1 rounded-full border border-clay/40 bg-clay/10 px-2 py-0.5 text-xs font-semibold text-clay"
+                          title={`Blocked ${format(new Date(u.blocked_at!), 'MMM d, yyyy')} — cannot sign in`}
+                        >
+                          <Ban size={11} /> Blocked
                         </span>
                       )}
                     </div>
@@ -146,6 +211,53 @@ export default function UsersTab() {
                           </>
                         )}
                       </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        // Blocking an admin would let one lock the panel that
+                        // undoes it, so the server refuses; demote them first.
+                        disabled={(!blocked && !blockable) || setBlocked.isPending}
+                        title={
+                          blocked
+                            ? 'Let them sign in again'
+                            : isMe
+                              ? 'You cannot block yourself'
+                              : admin
+                                ? 'Remove their admin role first, then block them'
+                                : 'Stop them signing in. Their bookings and history stay.'
+                        }
+                        onClick={() => setBlocked.mutate({ id: u.id, blocked: !blocked })}
+                      >
+                        {blocked ? (
+                          <>
+                            <RotateCcw size={14} /> Unblock
+                          </>
+                        ) : (
+                          <>
+                            <Ban size={14} /> Block
+                          </>
+                        )}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-clay"
+                        // Only ever offered on an account that has nothing to
+                        // lose — anything with history is a job for Block.
+                        disabled={!deletable || remove.isPending}
+                        title={
+                          isMe
+                            ? 'You cannot delete your own account'
+                            : admin
+                              ? 'Remove their admin role first'
+                              : history > 0
+                                ? 'Has booking, journal or message history — use Block instead'
+                                : 'Delete this empty account for good'
+                        }
+                        onClick={() => setConfirmDelete(u)}
+                      >
+                        <Trash2 size={14} /> Delete
+                      </Button>
                     </div>
                   </td>
                 </tr>
@@ -154,6 +266,33 @@ export default function UsersTab() {
           </tbody>
         </table>
       </div>
+
+      <Modal
+        open={confirmDelete !== null}
+        onClose={() => setConfirmDelete(null)}
+        title="Delete this account?"
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-charcoal">
+            <strong>{confirmDelete?.full_name ?? confirmDelete?.email}</strong> has never booked,
+            posted or messaged, so there is nothing to keep. This cannot be undone, though they can
+            sign up again with the same address.
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" type="button" onClick={() => setConfirmDelete(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              type="button"
+              disabled={remove.isPending}
+              onClick={() => confirmDelete && remove.mutate(confirmDelete.id)}
+            >
+              {remove.isPending ? 'Deleting…' : 'Delete account'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }

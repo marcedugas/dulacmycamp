@@ -1,0 +1,18 @@
+-- Reversible account block, for a guest who has to be kept out without
+-- losing what they did while they were in.
+--
+-- A timestamp rather than a boolean, matching `journal_entries.archived_at`:
+-- "blocked" and "when" are the same question in practice, and a bare flag
+-- throws the answer away.
+--
+-- NULL means not blocked, which is the state every account starts in. There
+-- is no schema-level guard against blocking an admin — "admins can't be
+-- blocked" is a rule about a role that the admin panel can change at any
+-- time, so it lives in the application (see `users::block`), the same place
+-- and for the same reason as the password_hash/role rule in 0009.
+--
+-- Blocking deliberately does NOT touch the account's bookings. Cancelling a
+-- blocked guest's approved stay is a separate decision about a specific
+-- weekend, and the admin makes it booking by booking with the cancel action
+-- that already exists.
+ALTER TABLE users ADD COLUMN blocked_at timestamptz;

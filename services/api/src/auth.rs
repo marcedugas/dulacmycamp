@@ -94,9 +94,37 @@ async fn user_from_parts(parts: &Parts, state: &Shared) -> Result<Option<User>, 
         .parse()
         .map_err(|_| AppError::Unauthorized("Malformed token.".into()))?;
 
-    // Load from the database rather than trusting the claims: a role change or
-    // a deleted account must take effect before the 24h token expires.
+    // Load from the database rather than trusting the claims: a role change, a
+    // block, or a deleted account must take effect before the 24h token
+    // expires.
     users::find_by_id(&state.db, id).await.map_err(Into::into)
+}
+
+/// What a blocked account is told, wherever it is turned away.
+///
+/// Not the deliberately-vague wording `login_password` uses: this is an
+/// account-status fact, the person it concerns already knows their own
+/// address, and there is no secret in it to grind at. Being clear is what
+/// stops a blocked guest filing a bug report about a broken login.
+///
+/// 401 rather than 403 on purpose — the web client drops its stored token on a
+/// 401, so a session that has just been blocked ends up back at the sign-in
+/// screen instead of looping on failed requests.
+fn blocked() -> AppError {
+    AppError::Unauthorized(
+        "This account is no longer able to sign in. Please contact the camp owner.".into(),
+    )
+}
+
+/// The gate every authenticated request passes through, alongside the role
+/// check. `user_from_parts` deliberately returns blocked accounts as-is so
+/// that each extractor below has to say what it does with one — a new
+/// extractor cannot inherit the answer by accident.
+fn require_active(user: User) -> Result<User, AppError> {
+    if user.is_blocked() {
+        return Err(blocked());
+    }
+    Ok(user)
 }
 
 impl FromRequestParts<Shared> for AuthUser {
@@ -106,10 +134,10 @@ impl FromRequestParts<Shared> for AuthUser {
         parts: &mut Parts,
         state: &Shared,
     ) -> Result<Self, Self::Rejection> {
-        user_from_parts(parts, state)
+        let user = user_from_parts(parts, state)
             .await?
-            .map(AuthUser)
-            .ok_or_else(|| AppError::Unauthorized("Sign in to continue.".into()))
+            .ok_or_else(|| AppError::Unauthorized("Sign in to continue.".into()))?;
+        Ok(AuthUser(require_active(user)?))
     }
 }
 
@@ -120,9 +148,11 @@ impl FromRequestParts<Shared> for AdminUser {
         parts: &mut Parts,
         state: &Shared,
     ) -> Result<Self, Self::Rejection> {
-        let user = user_from_parts(parts, state)
-            .await?
-            .ok_or_else(|| AppError::Unauthorized("Sign in to continue.".into()))?;
+        let user = require_active(
+            user_from_parts(parts, state)
+                .await?
+                .ok_or_else(|| AppError::Unauthorized("Sign in to continue.".into()))?,
+        )?;
         if !user.is_admin() {
             return Err(AppError::Forbidden("Admins only.".into()));
         }
@@ -137,7 +167,15 @@ impl FromRequestParts<Shared> for MaybeUser {
         parts: &mut Parts,
         state: &Shared,
     ) -> Result<Self, Self::Rejection> {
-        Ok(MaybeUser(user_from_parts(parts, state).await?))
+        // Blocked reads as signed-out here rather than as an error: these are
+        // the public pages, and a blocked guest should still be able to load
+        // the landing page as any stranger can — just without their own
+        // details on it.
+        Ok(MaybeUser(
+            user_from_parts(parts, state)
+                .await?
+                .filter(|u| !u.is_blocked()),
+        ))
     }
 }
 
@@ -186,6 +224,12 @@ pub async fn request_otp(
 
     // Self-registration: first code request creates the guest account.
     let user = match users::find_by_email(&state.db, &email).await? {
+        Some(u) if u.is_blocked() => {
+            // Refused before a code is minted or mailed, so a blocked address
+            // stops costing anything the moment it is blocked.
+            tracing::info!(user_id = %u.id, "otp request from a blocked account");
+            return Err(blocked());
+        }
         Some(u) => u,
         None => {
             sqlx::query_as::<_, User>(&format!(
@@ -455,6 +499,7 @@ mod tests {
             notes: None,
             role: role.into(),
             is_owner: false,
+            blocked_at: None,
             avatar_url: None,
             has_password,
             last_login_at: None,
@@ -624,6 +669,50 @@ mod tests {
         );
         // A different account is unaffected.
         assert!(limits.password_per_email.check("other@example.com").is_ok());
+    }
+
+    // ─────────────── blocked accounts ───────────────
+
+    /// The property the whole feature rests on: because the user row is
+    /// re-read on every request, a block takes effect on the *next* request a
+    /// still-valid token makes, not at its next login.
+    #[tokio::test]
+    async fn a_blocked_account_is_turned_away_mid_session() {
+        let mut blocked_user = user("guest", false);
+        blocked_user.blocked_at = Some(Utc::now());
+
+        let err = require_active(blocked_user).expect_err("a blocked account must be refused");
+        let (status, body) = rendered(err).await;
+        // 401, not 403: the web client drops its stored token on a 401, so the
+        // blocked session ends at the sign-in screen instead of looping.
+        assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+        let text = String::from_utf8(body).unwrap();
+        assert!(
+            text.contains("camp owner"),
+            "a blocked guest needs to be told who to ask: {text}",
+        );
+    }
+
+    /// An admin session is not exempt from the check — the guard against
+    /// blocking an admin lives in `users::require_blockable`, not here, so if
+    /// one ever is blocked (directly in the database, say) it is still out.
+    #[tokio::test]
+    async fn a_blocked_admin_is_turned_away_too() {
+        let mut blocked_admin = user("admin", false);
+        blocked_admin.blocked_at = Some(Utc::now());
+        assert!(require_active(blocked_admin).is_err());
+    }
+
+    /// Unblocking is the whole undo: with `blocked_at` back to NULL the same
+    /// account passes again, with nothing else to restore.
+    #[test]
+    fn an_unblocked_account_passes_again() {
+        let mut u = user("guest", false);
+        u.blocked_at = Some(Utc::now());
+        assert!(require_active(u.clone()).is_err());
+
+        u.blocked_at = None;
+        assert!(require_active(u).is_ok());
     }
 
     /// The password budget is meaner than the OTP one, which guards a mail

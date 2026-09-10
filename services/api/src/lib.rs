@@ -225,6 +225,11 @@ pub fn router(state: Shared) -> Router {
         .route("/users", get(users::list_all))
         .route("/users/{id}/role", put(users::update_role))
         .route("/users/{id}/owner", put(users::update_owner))
+        // Blocking is the reversible tool and the one to reach for; the
+        // delete is only permitted on an account with no history at all.
+        .route("/users/{id}/block", put(users::block))
+        .route("/users/{id}/unblock", put(users::unblock))
+        .route("/users/{id}", delete(users::remove))
         // ── calendar annotations ──
         .route(
             "/blackout-dates",

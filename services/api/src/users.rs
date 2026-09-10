@@ -26,6 +26,10 @@ pub struct User {
     /// Receives the one-click approve/deny email. Any number of users may be
     /// flagged; all of them get it.
     pub is_owner: bool,
+    /// When this account was blocked, or `None` if it is in good standing.
+    /// A blocked account keeps every row it ever wrote and simply stops being
+    /// able to act — see [`User::is_blocked`].
+    pub blocked_at: Option<DateTime<Utc>>,
     pub avatar_url: Option<String>,
     /// Whether an admin password is set — the boolean only, never the hash.
     /// Computed in SQL by `USER_COLUMNS` so `password_hash` itself is not in
@@ -39,6 +43,16 @@ pub struct User {
 impl User {
     pub fn is_admin(&self) -> bool {
         self.role == "admin"
+    }
+
+    /// Whether this account has been blocked by an admin.
+    ///
+    /// Checked on every authenticated request (`crate::auth`) rather than only
+    /// at login, so a block lands on a session that is already open — the same
+    /// reason the user row is re-read from the database each time instead of
+    /// trusting the token's claims.
+    pub fn is_blocked(&self) -> bool {
+        self.blocked_at.is_some()
     }
 
     /// Whether this user may see who is on a booking — name, email, pets,
@@ -67,7 +81,7 @@ impl User {
 /// `has_password`. The one place the hash itself is read is
 /// [`find_with_password`], which the password login calls and nothing else.
 pub const USER_COLUMNS: &str = "id, email, full_name, phone, relationship, boat_info, notes, \
-                                role, is_owner, avatar_url, \
+                                role, is_owner, blocked_at, avatar_url, \
                                 (password_hash IS NOT NULL) AS has_password, \
                                 last_login_at, created_at, updated_at";
 
@@ -210,30 +224,47 @@ pub async fn update_me(
     Ok(Json(updated))
 }
 
-/// Admin roster: every user with their booking count, for the Users tab.
+/// Admin roster: every user with the history hanging off them, for the Users
+/// tab.
+///
+/// The three counts are the same three [`history_counts`] gates a hard delete
+/// on, sent up front so the Users tab can disable Delete on an account that
+/// has any, instead of offering a button whose only outcome is an error.
 #[derive(Debug, Serialize, FromRow)]
 pub struct UserWithStats {
     #[sqlx(flatten)]
     #[serde(flatten)]
     pub user: User,
     pub booking_count: i64,
+    pub journal_count: i64,
+    /// Messages sent *or* received — either direction is history worth keeping.
+    pub message_count: i64,
 }
+
+/// The roster's counts, as correlated subqueries rather than joins: three
+/// `LEFT JOIN`s onto one `GROUP BY` would multiply rows against each other and
+/// count every booking once per message.
+const ROSTER_COUNTS: &str = "(SELECT count(*) FROM bookings b WHERE b.user_id = u.id) \
+                             AS booking_count, \
+                             (SELECT count(*) FROM journal_entries j WHERE j.user_id = u.id) \
+                             AS journal_count, \
+                             (SELECT count(*) FROM messages m \
+                              WHERE m.sender_id = u.id OR m.recipient_id = u.id) \
+                             AS message_count";
 
 pub async fn list_all(
     State(state): State<Shared>,
     AdminUser(_): AdminUser,
 ) -> ApiResult<Json<Vec<UserWithStats>>> {
-    let rows = sqlx::query_as::<_, UserWithStats>(
+    let rows = sqlx::query_as::<_, UserWithStats>(&format!(
         "SELECT u.id, u.email, u.full_name, u.phone, u.relationship, u.boat_info, u.notes,
-                u.role, u.is_owner, u.avatar_url,
+                u.role, u.is_owner, u.blocked_at, u.avatar_url,
                 (u.password_hash IS NOT NULL) AS has_password,
                 u.last_login_at, u.created_at, u.updated_at,
-                count(b.id) AS booking_count
+                {ROSTER_COUNTS}
          FROM users u
-         LEFT JOIN bookings b ON b.user_id = u.id
-         GROUP BY u.id
-         ORDER BY u.created_at DESC",
-    )
+         ORDER BY u.created_at DESC"
+    ))
     .fetch_all(&state.db)
     .await?;
 
@@ -307,4 +338,280 @@ pub async fn update_owner(
     .ok_or_else(|| AppError::NotFound("User not found.".into()))?;
 
     Ok(Json(updated))
+}
+
+// ─────────────────────── blocking and deletion ───────────────────────
+//
+// Two tools for the same problem, deliberately unequal. Blocking is the one
+// to reach for: it is reversible, and the account's bookings, journal entries
+// and messages stay exactly where they are. Deleting is only offered when
+// there is provably nothing to lose.
+
+/// Whether this account may be blocked at all.
+///
+/// Admins are refused rather than blocked, because blocking one is almost
+/// always a mistake with an expensive shape: an admin who blocks themselves,
+/// or the last other admin, locks the panel that would undo it. Demoting to
+/// guest first is one extra click and makes the intent explicit.
+fn require_blockable(user: &User) -> Result<(), AppError> {
+    if user.is_admin() {
+        return Err(AppError::BadRequest(
+            "Admin accounts can't be blocked. Remove their admin role first, then block them."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Everything hanging off an account that a hard delete would destroy.
+///
+/// `booking_checkouts` is absent on purpose and not an oversight: a checkout
+/// row requires a booking, so `bookings == 0` already implies none exists.
+/// The same holds for journal entries, which are counted anyway because the
+/// admin panel shows the number.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, FromRow)]
+pub struct HistoryCounts {
+    pub bookings: i64,
+    pub journal: i64,
+    pub messages: i64,
+}
+
+impl HistoryCounts {
+    fn is_empty(&self) -> bool {
+        self.bookings == 0 && self.journal == 0 && self.messages == 0
+    }
+}
+
+async fn history_counts(db: &sqlx::PgPool, id: Uuid) -> Result<HistoryCounts, sqlx::Error> {
+    sqlx::query_as::<_, HistoryCounts>(
+        "SELECT (SELECT count(*) FROM bookings WHERE user_id = $1) AS bookings,
+                (SELECT count(*) FROM journal_entries WHERE user_id = $1) AS journal,
+                (SELECT count(*) FROM messages
+                  WHERE sender_id = $1 OR recipient_id = $1) AS messages",
+    )
+    .bind(id)
+    .fetch_one(db)
+    .await
+}
+
+/// Whether this account may be removed from the database outright.
+///
+/// Two gates. An admin is never deleted, for the same reason one is never
+/// blocked. And an account with any history at all is refused: the rows would
+/// go with it (bookings cascade, messages sent to them cascade) or the delete
+/// would fail on a foreign key, and either way a stay that actually happened
+/// stops being on the record. Blocking is what that case wants, so the error
+/// says so rather than just refusing.
+fn require_deletable(user: &User, history: &HistoryCounts) -> Result<(), AppError> {
+    if user.is_admin() {
+        return Err(AppError::BadRequest(
+            "Admin accounts can't be deleted. Remove their admin role first.".into(),
+        ));
+    }
+    if !history.is_empty() {
+        return Err(AppError::Conflict(
+            "This account has booking, journal or message history — use Block to prevent \
+             future access while keeping their record intact."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+/// `PUT /users/{id}/block` — stops an account acting, from the next request on.
+///
+/// What this does *not* do is touch their bookings. A blocked guest's pending
+/// and approved stays stay exactly as they were; cancelling one is a separate
+/// decision about a specific weekend, made with the cancel action that already
+/// exists. Auto-cascading would quietly deny a stay the admin may still want
+/// to honour.
+pub async fn block(
+    State(state): State<Shared>,
+    AdminUser(_): AdminUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<User>> {
+    let target = find_by_id(&state.db, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found.".into()))?;
+    require_blockable(&target)?;
+
+    // COALESCE keeps the original timestamp if they were already blocked, so a
+    // second click doesn't rewrite when it happened.
+    let updated = sqlx::query_as::<_, User>(&format!(
+        "UPDATE users SET blocked_at = COALESCE(blocked_at, now())
+         WHERE id = $1 RETURNING {USER_COLUMNS}"
+    ))
+    .bind(id)
+    .fetch_one(&state.db)
+    .await?;
+
+    tracing::info!(user_id = %id, email = %updated.email, "user blocked");
+    Ok(Json(updated))
+}
+
+/// `PUT /users/{id}/unblock` — restores an account. Nothing else to undo,
+/// which is the point of blocking rather than deleting.
+pub async fn unblock(
+    State(state): State<Shared>,
+    AdminUser(_): AdminUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<User>> {
+    let updated = sqlx::query_as::<_, User>(&format!(
+        "UPDATE users SET blocked_at = NULL WHERE id = $1 RETURNING {USER_COLUMNS}"
+    ))
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::NotFound("User not found.".into()))?;
+
+    tracing::info!(user_id = %id, email = %updated.email, "user unblocked");
+    Ok(Json(updated))
+}
+
+/// `DELETE /users/{id}` — removes an account that never did anything.
+///
+/// The narrow case this exists for: a typo'd address, or someone who asked for
+/// a login code once and never came back. Anything with a trace is refused and
+/// pointed at Block.
+pub async fn remove(
+    State(state): State<Shared>,
+    AdminUser(_): AdminUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let target = find_by_id(&state.db, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found.".into()))?;
+    let history = history_counts(&state.db, id).await?;
+    require_deletable(&target, &history)?;
+
+    let mut tx = state.db.begin().await?;
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    // otp_codes are keyed by address, not by a foreign key, so an outstanding
+    // code would survive the row and still be redeemable by whoever
+    // self-registers that address next. Same reasoning as migration 0004.
+    sqlx::query("DELETE FROM otp_codes WHERE lower(email) = lower($1)")
+        .bind(&target.email)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+
+    tracing::info!(user_id = %id, email = %target.email, "user deleted");
+    Ok(Json(serde_json::json!({ "deleted": true })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::response::IntoResponse;
+
+    fn user(role: &str, blocked: bool) -> User {
+        let now = Utc::now();
+        User {
+            id: Uuid::nil(),
+            email: "guest@example.com".into(),
+            full_name: None,
+            phone: None,
+            relationship: None,
+            boat_info: None,
+            notes: None,
+            role: role.into(),
+            is_owner: false,
+            blocked_at: blocked.then_some(now),
+            avatar_url: None,
+            has_password: false,
+            last_login_at: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// The status and body a caller actually receives.
+    async fn rendered(e: AppError) -> (axum::http::StatusCode, String) {
+        let resp = e.into_response();
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("error bodies are small");
+        (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    #[test]
+    fn blocked_at_is_what_makes_an_account_blocked() {
+        assert!(!user("guest", false).is_blocked());
+        assert!(user("guest", true).is_blocked());
+    }
+
+    // ─────────────── who may be blocked ───────────────
+
+    #[test]
+    fn a_guest_may_be_blocked() {
+        assert!(require_blockable(&user("guest", false)).is_ok());
+        // Already blocked is fine — the handler makes the second click a no-op
+        // rather than an error.
+        assert!(require_blockable(&user("guest", true)).is_ok());
+    }
+
+    /// The lockout guard: blocking an admin is refused, and the refusal says
+    /// what to do instead rather than just "no".
+    #[tokio::test]
+    async fn an_admin_cannot_be_blocked() {
+        let err = require_blockable(&user("admin", false))
+            .expect_err("blocking an admin must be refused");
+        let (status, body) = rendered(err).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(body.contains("admin role"), "unhelpful refusal: {body}");
+    }
+
+    // ─────────────── who may be deleted ───────────────
+
+    #[test]
+    fn a_guest_with_nothing_attached_can_be_deleted() {
+        assert!(require_deletable(&user("guest", false), &HistoryCounts::default()).is_ok());
+        // Blocked already, and still empty — deleting is allowed, just rarely
+        // what anyone wants.
+        assert!(require_deletable(&user("guest", true), &HistoryCounts::default()).is_ok());
+    }
+
+    /// Any one of the three counts is enough to refuse, so a guest with only
+    /// messages is as protected as one with bookings.
+    #[tokio::test]
+    async fn any_history_at_all_refuses_the_delete() {
+        let counts = |bookings, journal, messages| HistoryCounts {
+            bookings,
+            journal,
+            messages,
+        };
+        let cases = [
+            ("a booking", counts(1, 0, 0)),
+            ("a journal entry", counts(0, 1, 0)),
+            ("a message", counts(0, 0, 1)),
+        ];
+        for (label, history) in cases {
+            let Err(err) = require_deletable(&user("guest", false), &history) else {
+                panic!("{label} must protect the account from deletion");
+            };
+            let (status, body) = rendered(err).await;
+            assert_eq!(status, axum::http::StatusCode::CONFLICT, "for {label}");
+            // The refusal has to point at the tool that does work here,
+            // otherwise the admin is left with a dead end.
+            assert!(
+                body.contains("Block"),
+                "for {label}, no pointer to Block: {body}"
+            );
+        }
+    }
+
+    /// Same reasoning as blocking: an admin is never deleted, however empty
+    /// their history is.
+    #[tokio::test]
+    async fn an_admin_cannot_be_deleted() {
+        let err = require_deletable(&user("admin", false), &HistoryCounts::default())
+            .expect_err("deleting an admin must be refused");
+        let (status, body) = rendered(err).await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(body.contains("admin role"), "unhelpful refusal: {body}");
+    }
 }

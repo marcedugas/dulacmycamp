@@ -14,6 +14,11 @@ export interface User {
   role: Role;
   /** Receives the booking approve/deny email. Any number of users may be owners. */
   is_owner: boolean;
+  /** When an admin blocked this account, or null if it is in good standing.
+   * A blocked account keeps all of its history and simply stops being able to
+   * sign in or act — the API re-checks this on every request, so a block lands
+   * on a session that is already open. */
+  blocked_at: string | null;
   avatar_url: string | null;
   /** Whether an admin password is set. Never the hash itself — the API only
    * ever reports its presence. Always false for guests. */
@@ -30,6 +35,9 @@ export interface MessageResponse {
 
 export interface UserWithStats extends User {
   booking_count: number;
+  journal_count: number;
+  /** Messages sent *or* received — either direction is history worth keeping. */
+  message_count: number;
 }
 
 /**

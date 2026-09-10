@@ -339,6 +339,20 @@ pub async fn create_booking_for(
     user: &User,
     body: CreateBooking,
 ) -> ApiResult<CreateResponse> {
+    // Defence in depth, and the one check that isn't redundant on both paths.
+    // A blocked guest submitting their own request never gets this far — the
+    // auth extractor turns them away first. But `admin_create` resolves the
+    // guest by email through `find_or_create_guest`, so an admin typing a
+    // blocked address into the manual-entry form arrives here with a perfectly
+    // valid admin session and a blocked `user`. This is the only place a
+    // booking row is written, so it is the right place to say no.
+    if user.is_blocked() {
+        return Err(AppError::Forbidden(
+            "That account is blocked and can't have a stay booked. Unblock it first if this \
+             booking should go ahead."
+                .into(),
+        ));
+    }
     if body.check_out <= body.check_in {
         return Err(AppError::BadRequest(
             "Check-out must be after check-in.".into(),
