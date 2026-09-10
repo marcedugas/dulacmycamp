@@ -130,10 +130,28 @@ export interface SiteContent {
   hero_subtitle: string;
   about_text: string;
   hero_image_url: string | null;
-  guest_photos_url: string | null;
   rules: { id: string; text: string }[];
   amenities: { id: string; label: string; icon: string | null }[];
   gallery: { id: string; url: string; caption: string | null }[];
+}
+
+/**
+ * The camp photo album — GET /api/guest-photos-link. Auth-gated and limited
+ * to guests with an approved booking, so this is a separate fetch rather than
+ * part of the public `SiteContent` payload. `url` is null when no admin has
+ * set a link yet; a guest with no approved stay gets a 403 instead.
+ */
+export interface GuestPhotosLink {
+  url: string | null;
+}
+
+/** Admin-only read of the editable settings — GET /api/admin/site-content/settings. */
+export interface SiteSettingsAdmin {
+  hero_title: string;
+  hero_subtitle: string;
+  about_text: string;
+  hero_image_url: string | null;
+  guest_photos_url: string | null;
 }
 
 export interface RuleItem {

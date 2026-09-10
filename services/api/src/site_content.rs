@@ -7,7 +7,10 @@
 //! and write here targets [`SETTINGS_ID`], and nothing ever inserts a second
 //! row.
 
-use crate::{ApiResult, AppError, Shared, auth::AdminUser};
+use crate::{
+    ApiResult, AppError, Shared,
+    auth::{AdminUser, AuthUser},
+};
 use axum::{
     Json,
     extract::{Multipart, Path, State, multipart::Field},
@@ -117,28 +120,46 @@ async fn fetch_settings(db: &PgPool) -> Result<SettingsRow, sqlx::Error> {
 }
 
 #[derive(Debug, Serialize, FromRow)]
-struct RulePublic {
-    id: Uuid,
-    text: String,
+pub struct RulePublic {
+    pub id: Uuid,
+    pub text: String,
 }
 
 #[derive(Debug, Serialize, FromRow)]
-struct AmenityPublic {
-    id: Uuid,
-    label: String,
-    icon: Option<String>,
+pub struct AmenityPublic {
+    pub id: Uuid,
+    pub label: String,
+    pub icon: Option<String>,
 }
 
 #[derive(Debug, Serialize, FromRow)]
-struct GalleryPublic {
-    id: Uuid,
-    url: String,
-    caption: Option<String>,
+pub struct GalleryPublic {
+    pub id: Uuid,
+    pub url: String,
+    pub caption: Option<String>,
+}
+
+/// Everything `GET /api/site-content` hands to an anonymous visitor.
+///
+/// A struct rather than an ad-hoc `json!` so the public shape is stated in
+/// one place and checked by the compiler. `guest_photos_url` is deliberately
+/// not a field: the album is for people who have actually stayed at the camp
+/// (see [`guest_photos_link`]), and leaving it out here means a future edit
+/// to `fetch_settings` cannot quietly put it back on the public endpoint.
+#[derive(Debug, Serialize)]
+pub struct PublicSiteContent {
+    pub hero_title: String,
+    pub hero_subtitle: String,
+    pub about_text: String,
+    pub hero_image_url: Option<String>,
+    pub rules: Vec<RulePublic>,
+    pub amenities: Vec<AmenityPublic>,
+    pub gallery: Vec<GalleryPublic>,
 }
 
 /// `GET /api/site-content` — public, no auth. Everything the landing page
 /// needs in one payload, so it's one fetch instead of five.
-pub async fn get_site_content(State(state): State<Shared>) -> ApiResult<Json<Value>> {
+pub async fn get_site_content(State(state): State<Shared>) -> ApiResult<Json<PublicSiteContent>> {
     let settings = fetch_settings(&state.db).await?;
     let rules = sqlx::query_as::<_, RulePublic>(
         "SELECT id, text FROM rules_items ORDER BY sort_order, created_at",
@@ -156,16 +177,94 @@ pub async fn get_site_content(State(state): State<Shared>) -> ApiResult<Json<Val
     .fetch_all(&state.db)
     .await?;
 
-    Ok(Json(json!({
-        "hero_title": settings.hero_title,
-        "hero_subtitle": settings.hero_subtitle,
-        "about_text": settings.about_text,
-        "hero_image_url": settings.hero_image_url,
-        "guest_photos_url": settings.guest_photos_url,
-        "rules": rules,
-        "amenities": amenities,
-        "gallery": gallery,
-    })))
+    Ok(Json(PublicSiteContent {
+        hero_title: settings.hero_title,
+        hero_subtitle: settings.hero_subtitle,
+        about_text: settings.about_text,
+        hero_image_url: settings.hero_image_url,
+        rules,
+        amenities,
+        gallery,
+    }))
+}
+
+/// `GET /api/admin/site-content/settings` — admin only.
+///
+/// The Site Content tab seeds its form from this rather than from the public
+/// payload above, which no longer carries `guest_photos_url`. Without it the
+/// admin's link field would load blank and the next save would write that
+/// blank straight over the stored link.
+pub async fn get_settings_admin(
+    State(state): State<Shared>,
+    AdminUser(_): AdminUser,
+) -> ApiResult<Json<Value>> {
+    let settings = fetch_settings(&state.db).await?;
+    Ok(Json(json!(settings)))
+}
+
+// ─────────────────────── guest photos link ───────────────────────
+
+/// Whether one booking, by status alone, grants access to the photo album.
+///
+/// Deliberately looser than [`crate::checkin_info::has_access`], and the two
+/// must not be conflated: check-in info is operational (the key location, the
+/// wifi code) and stops the moment a stay is checked out, whereas the album is
+/// a communal keepsake. Someone who stayed at the camp helped make it, so
+/// their access does not expire — not when they check out, and not when the
+/// stay recedes into the past. Dates are irrelevant here for the same reason.
+fn grants_photos_access(status: &str) -> bool {
+    status == "approved"
+}
+
+/// Whether *any* of a user's bookings grants album access. Pure mirror of the
+/// `EXISTS` query in [`has_photos_access`] — kept here as the tested,
+/// documented spec of the rule.
+pub fn has_access(statuses: &[&str]) -> bool {
+    statuses.iter().any(|status| grants_photos_access(status))
+}
+
+/// Whether `user_id` may see the album. See [`has_access`] for the rule; this
+/// evaluates it as one SQL `EXISTS` rather than pulling every booking into
+/// Rust to fold over.
+async fn has_photos_access(db: &PgPool, user_id: Uuid) -> Result<bool, sqlx::Error> {
+    let (allowed,): (bool,) = sqlx::query_as(
+        "SELECT EXISTS(
+            SELECT 1 FROM bookings WHERE user_id = $1 AND status = 'approved'
+         )",
+    )
+    .bind(user_id)
+    .fetch_one(db)
+    .await?;
+    Ok(allowed)
+}
+
+#[derive(Debug, Serialize)]
+pub struct GuestPhotosLink {
+    /// `None` when no admin has set a link yet — a normal state for an
+    /// otherwise-eligible guest, and distinct from being turned away.
+    pub url: Option<String>,
+}
+
+/// `GET /api/guest-photos-link` — the album link, for anyone who has stayed.
+///
+/// 403 for a guest with no approved booking rather than `{ "url": null }`,
+/// matching [`crate::checkin_info::list_for_guest`]: null already means
+/// "nobody has set one yet", and one shape cannot carry both answers without
+/// the frontend guessing which it got.
+pub async fn guest_photos_link(
+    State(state): State<Shared>,
+    AuthUser(user): AuthUser,
+) -> ApiResult<Json<GuestPhotosLink>> {
+    if !has_photos_access(&state.db, user.id).await? {
+        return Err(AppError::Forbidden(
+            "The camp photo album is for guests who have stayed with us.".into(),
+        ));
+    }
+
+    let settings = fetch_settings(&state.db).await?;
+    Ok(Json(GuestPhotosLink {
+        url: settings.guest_photos_url,
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -568,6 +667,56 @@ mod tests {
     fn rejects_files_over_the_cap() {
         assert!(validate_upload("image/jpeg", MAX_IMAGE_BYTES).is_ok());
         assert!(validate_upload("image/jpeg", MAX_IMAGE_BYTES + 1).is_err());
+    }
+
+    // The public payload must not carry the album link. Asserting on the
+    // serialized shape, not the struct, since that is what actually ships.
+    #[test]
+    fn the_public_payload_has_no_guest_photos_url_at_all() {
+        let payload = PublicSiteContent {
+            hero_title: "Dulac My Camp".into(),
+            hero_subtitle: "On the bayou".into(),
+            about_text: "A camp.".into(),
+            hero_image_url: Some("/uploads/hero.jpg".into()),
+            rules: vec![],
+            amenities: vec![],
+            gallery: vec![],
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        let object = json.as_object().unwrap();
+
+        // Absent, not present-and-null: `get` returns None either way, so
+        // check the key set itself.
+        assert!(!object.contains_key("guest_photos_url"));
+        // The rest of the landing page still arrives.
+        assert!(object.contains_key("hero_title"));
+        assert!(object.contains_key("gallery"));
+    }
+
+    #[test]
+    fn a_guest_with_no_approved_booking_is_turned_away() {
+        assert!(!has_access(&[]));
+        assert!(!has_access(&["pending"]));
+        assert!(!has_access(&["denied"]));
+        assert!(!has_access(&["cancelled"]));
+        assert!(!has_access(&["pending", "denied", "cancelled"]));
+    }
+
+    #[test]
+    fn one_approved_booking_is_enough() {
+        assert!(has_access(&["approved"]));
+        assert!(has_access(&["denied", "approved", "pending"]));
+    }
+
+    // The point of difference from check-in info, spelled out so the two
+    // rules cannot be quietly merged later. Album access is decided by
+    // status alone: no date, no checkout state, nothing that expires.
+    #[test]
+    fn a_completed_past_stay_still_grants_album_access() {
+        // `crate::checkin_info::has_access` says false for this same guest,
+        // whose only approved booking has been checked out.
+        assert!(!crate::checkin_info::has_access(&[("approved", true)]));
+        assert!(has_access(&["approved"]));
     }
 
     #[test]

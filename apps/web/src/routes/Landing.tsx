@@ -5,7 +5,6 @@ import {
   ArrowRight,
   CalendarDays,
   CheckCircle2,
-  ExternalLink,
   Image as ImageIcon,
   PartyPopper,
   XCircle,
@@ -156,21 +155,6 @@ function UpcomingEvents() {
   );
 }
 
-/** "Leaving the site" link to a guest-managed Google Photos album. Renders nothing when unset. */
-function GuestPhotosLink({ url }: { url: string | null }) {
-  if (!url) return null;
-  return (
-    <a
-      href={url}
-      target="_blank"
-      rel="noreferrer noopener"
-      className="inline-flex items-center gap-1.5 text-sm font-semibold text-forest-700 hover:text-forest-800 hover:underline"
-    >
-      See Everyone's Photos <ExternalLink size={14} />
-    </a>
-  );
-}
-
 export default function Landing() {
   const { data: config } = useConfig();
   const { data: content, isLoading } = useSiteContent();
@@ -185,7 +169,6 @@ export default function Landing() {
   const rules = content?.rules ?? [];
   const amenities = content?.amenities ?? [];
   const gallery = content?.gallery ?? [];
-  const guestPhotosUrl = content?.guest_photos_url ?? null;
 
   return (
     <>
@@ -290,11 +273,6 @@ export default function Landing() {
                 <span className="text-xs font-semibold uppercase tracking-wide">Photos coming soon</span>
               </div>
             )
-          )}
-          {guestPhotosUrl && (
-            <div className="mt-4">
-              <GuestPhotosLink url={guestPhotosUrl} />
-            </div>
           )}
         </div>
       </Section>

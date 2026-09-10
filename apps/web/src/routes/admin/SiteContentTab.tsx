@@ -5,17 +5,27 @@ import { ArrowDown, ArrowUp, ExternalLink, ImagePlus, Plus, Trash2, Upload } fro
 import { Button, Card, EmptyState, Field, Input, Section, Spinner, Textarea, cx } from '../../components/ui';
 import { api, ApiError, assetUrl } from '../../lib/api';
 import { AMENITY_ICON_NAMES, amenityIcon } from '../../lib/icons';
-import { useAmenitiesAdmin, useGalleryAdmin, useRulesAdmin, useSiteContent } from '../../lib/queries';
-import type { AmenityItem, GalleryPhoto, RuleItem, SiteContent } from '../../lib/types';
+import {
+  useAmenitiesAdmin,
+  useGalleryAdmin,
+  useRulesAdmin,
+  useSiteSettingsAdmin,
+} from '../../lib/queries';
+import type { AmenityItem, GalleryPhoto, RuleItem, SiteSettingsAdmin } from '../../lib/types';
 
 const onError = (err: unknown) =>
   toast.error(err instanceof ApiError ? err.message : 'That action failed.');
 
 // ─────────────────────────── hero / about / guest photos ───────────────────────────
 
-function SettingsSection({ content }: { content: SiteContent | undefined }) {
+function SettingsSection({ content }: { content: SiteSettingsAdmin | undefined }) {
   const queryClient = useQueryClient();
-  const invalidate = () => void queryClient.invalidateQueries({ queryKey: ['site-content'] });
+  const invalidate = () => {
+    // Both: the landing page reads the public payload, this form reads the
+    // admin-only one that still carries the album link.
+    void queryClient.invalidateQueries({ queryKey: ['site-content'] });
+    void queryClient.invalidateQueries({ queryKey: ['admin-site-settings'] });
+  };
   const fileInput = useRef<HTMLInputElement>(null);
 
   const [form, setForm] = useState({
@@ -158,7 +168,7 @@ function SettingsSection({ content }: { content: SiteContent | undefined }) {
         <h3 className="mb-4 font-bold text-charcoal">Guest photos</h3>
         <Field
           label="Google Photos album link"
-          hint="Paste the share link for a Google Photos album with “anyone with the link can add photos” turned on. Leave blank to hide this from the site."
+          hint="Paste the share link for a Google Photos album with “anyone with the link can add photos” turned on. Shown on My Stay to guests who have had a booking approved — not on the public site. Leave blank to hide it from them too."
         >
           <Input
             type="url"
@@ -619,11 +629,14 @@ function GallerySection() {
 // ─────────────────────────── tab ───────────────────────────
 
 export default function SiteContentTab() {
-  const { data: content } = useSiteContent();
+  const { data: content } = useSiteSettingsAdmin();
 
   return (
     <div className="space-y-10">
-      <Section title="Hero, about & guest photos" subtitle="What visitors see at the top of the site.">
+      <Section
+        title="Hero, about & guest photos"
+        subtitle="The top of the public site, plus the album link only past and upcoming guests see."
+      >
         <SettingsSection content={content} />
       </Section>
       <Section title="House rules" subtitle="Shown on the landing page, in order.">
