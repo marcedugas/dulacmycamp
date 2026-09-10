@@ -934,6 +934,80 @@ fn should_notify_owner_of_cancellation(previous_status: &str) -> bool {
     previous_status == "approved"
 }
 
+/// What a delete took with it, so the panel can confirm what actually went
+/// rather than just saying "done".
+#[derive(Debug, Serialize)]
+pub struct DeleteSummary {
+    pub deleted: bool,
+    /// Whether a `crate::journal` entry was removed alongside the booking.
+    pub journal_entry: bool,
+    /// Whether a `crate::checkout` record was removed alongside it.
+    pub checkout: bool,
+}
+
+/// `DELETE /bookings/{id}` — removes a booking outright. Admins only.
+///
+/// Cancel is the everyday tool and the reversible one: it keeps the row, so a
+/// stay that was really booked stays on the record even once it is called off.
+/// This is for the narrower case where the row should never have existed —
+/// test data, a duplicate — and filing it as "cancelled" would just leave
+/// clutter that reads like history.
+///
+/// The booking's checkout record and journal entry go with it, in one
+/// transaction. Both foreign keys are plain `REFERENCES` with no `ON DELETE`,
+/// so the delete fails on them otherwise, and neither outlives its booking in
+/// any meaningful way: a checkout is the record of that stay ending, and
+/// `journal_entries.booking_id` is `NOT NULL UNIQUE`, so an entry has nowhere
+/// left to belong once the stay is gone. Messages are the exception and are
+/// left alone — `messages.booking_id` is `ON DELETE SET NULL`, so a
+/// conversation survives with the link cleared, which is right: what was said
+/// stands on its own.
+///
+/// Deliberately not guarded against deleting a confirmed upcoming stay. The
+/// admin already has unrestricted power over that booking through cancel, and
+/// forcing cancel-then-delete would add a step to the only workflow this
+/// exists for. Nothing is emailed either way, so the warning belongs in the
+/// panel, next to where the judgement is made.
+pub async fn admin_delete(
+    State(state): State<Shared>,
+    AdminUser(_): AdminUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<DeleteSummary>> {
+    let row = load_row(&state.db, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Booking not found.".into()))?;
+
+    let mut tx = state.db.begin().await?;
+    // Children first, for the foreign keys named above.
+    sqlx::query("DELETE FROM journal_entries WHERE booking_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM booking_checkouts WHERE booking_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM bookings WHERE id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+
+    tracing::info!(
+        booking_id = %id,
+        guest = %row.guest_email,
+        check_in = %row.booking.check_in,
+        status = %row.booking.status,
+        "booking deleted",
+    );
+
+    Ok(Json(DeleteSummary {
+        deleted: true,
+        journal_entry: row.journal_id.is_some(),
+        checkout: row.checked_out,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

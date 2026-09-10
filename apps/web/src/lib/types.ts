@@ -28,6 +28,14 @@ export interface User {
   updated_at: string;
 }
 
+/** What a booking delete took with it. Both children are unique per booking,
+ *  so these are booleans rather than counts. */
+export interface DeleteSummary {
+  deleted: boolean;
+  journal_entry: boolean;
+  checkout: boolean;
+}
+
 /** The API's plain `{ message }` acknowledgement. */
 export interface MessageResponse {
   message: string;

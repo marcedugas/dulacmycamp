@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { addDays, format } from 'date-fns';
 import { toast } from 'sonner';
-import { Check, CheckCircle2, Dog, Flag, Plus, TriangleAlert, X } from 'lucide-react';
+import { Check, CheckCircle2, Dog, Flag, Plus, Trash2, TriangleAlert, X } from 'lucide-react';
 import {
   Button,
   Card,
@@ -18,7 +18,13 @@ import {
 import { api, ApiError } from '../../lib/api';
 import { useAdminCheckouts, useBookings, useUsers } from '../../lib/queries';
 import { formatRange, nightCount, parseDay, pluralNights, toKey } from '../../lib/dates';
-import type { AdminCheckout, Booking, BookingStatus, CreateBookingResponse } from '../../lib/types';
+import type {
+  AdminCheckout,
+  Booking,
+  BookingStatus,
+  CreateBookingResponse,
+  DeleteSummary,
+} from '../../lib/types';
 
 const STATUSES: (BookingStatus | 'all')[] = ['all', 'pending', 'approved', 'denied', 'cancelled'];
 
@@ -244,6 +250,7 @@ export default function BookingsTab() {
   const [reason, setReason] = useState('');
   const [details, setDetails] = useState<Booking | null>(null);
   const [viewingCheckout, setViewingCheckout] = useState<Booking | null>(null);
+  const [deleting, setDeleting] = useState<Booking | null>(null);
   const [adding, setAdding] = useState(false);
   const { data: checkouts } = useAdminCheckouts();
   const checkoutDetail: AdminCheckout | undefined = viewingCheckout
@@ -288,6 +295,24 @@ export default function BookingsTab() {
     mutationFn: (id: string) => api(`/bookings/${id}/cancel`, { method: 'PUT' }),
     onSuccess: () => {
       toast.success('Booking cancelled.');
+      invalidate();
+    },
+    onError,
+  });
+
+  const remove = useMutation({
+    mutationFn: (id: string) => api<DeleteSummary>(`/bookings/${id}`, { method: 'DELETE' }),
+    onSuccess: (res) => {
+      // Say what actually went, since the journal entry and checkout are the
+      // parts an admin would not expect to lose.
+      const also = [
+        res.journal_entry && 'its journal entry',
+        res.checkout && 'its checkout note',
+      ].filter(Boolean);
+      toast.success(
+        also.length ? `Booking deleted, along with ${also.join(' and ')}.` : 'Booking deleted.',
+      );
+      setDeleting(null);
       invalidate();
     },
     onError,
@@ -441,6 +466,18 @@ export default function BookingsTab() {
                             Cancel
                           </Button>
                         )}
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="text-clay"
+                          // Cancel keeps the row and is what a called-off stay
+                          // wants. This is for rows that shouldn't exist.
+                          title="Remove this booking from the record entirely"
+                          disabled={remove.isPending}
+                          onClick={() => setDeleting(b)}
+                        >
+                          <Trash2 size={14} />
+                        </Button>
                       </div>
                     </td>
                   </tr>
@@ -537,6 +574,61 @@ export default function BookingsTab() {
             )}
           </div>
         )}
+      </Modal>
+
+      <Modal
+        open={Boolean(deleting)}
+        onClose={() => setDeleting(null)}
+        title="Delete this booking?"
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-charcoal">
+            {deleting && (
+              <>
+                <strong>{deleting.guest_name ?? deleting.guest_email}</strong>,{' '}
+                {formatRange(deleting.check_in, deleting.check_out)}. This removes it from the
+                record entirely and cannot be undone.
+              </>
+            )}
+          </p>
+
+          {/* The parts an admin would not expect to lose with the booking. */}
+          {(deleting?.journal_id || deleting?.checked_out) && (
+            <p className="rounded-lg border border-clay/30 bg-clay/5 px-3 py-2 text-xs text-clay">
+              This also deletes{' '}
+              {[
+                deleting?.journal_id && 'the guest’s journal entry',
+                deleting?.checked_out && 'the checkout note',
+              ]
+                .filter(Boolean)
+                .join(' and ')}
+              . Messages about this stay are kept.
+            </p>
+          )}
+
+          {/* Nothing is emailed on a delete, unlike cancel — so an upcoming
+              stay would simply vanish from the guest's account. */}
+          {deleting?.status === 'approved' && (
+            <p className="rounded-lg border border-wood-300 bg-wood-100 px-3 py-2 text-xs text-wood-800">
+              This is a confirmed stay and the guest is <strong>not</strong> emailed. Use Cancel
+              instead if it was really booked and is being called off.
+            </p>
+          )}
+
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" type="button" onClick={() => setDeleting(null)}>
+              Keep it
+            </Button>
+            <Button
+              variant="danger"
+              type="button"
+              disabled={remove.isPending}
+              onClick={() => deleting && remove.mutate(deleting.id)}
+            >
+              {remove.isPending ? 'Deleting…' : 'Delete booking'}
+            </Button>
+          </div>
+        </div>
       </Modal>
 
       <AddBookingModal open={adding} onClose={() => setAdding(false)} onCreated={invalidate} />
