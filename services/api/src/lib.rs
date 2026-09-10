@@ -216,7 +216,10 @@ pub fn router(state: Shared) -> Router {
         .route("/bookings/{id}/cancel", put(bookings::cancel))
         // Cancel is the reversible tool and the one to reach for; the delete
         // is for rows that should never have been there at all.
-        .route("/bookings/{id}", get(bookings::get_one).delete(bookings::admin_delete))
+        .route(
+            "/bookings/{id}",
+            get(bookings::get_one).delete(bookings::admin_delete),
+        )
         .route("/bookings/{id}/approve", put(bookings::admin_approve))
         .route("/bookings/{id}/deny", put(bookings::admin_deny))
         // Admin entering a booking on a guest's behalf (phone call, in

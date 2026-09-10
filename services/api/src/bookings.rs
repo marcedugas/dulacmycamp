@@ -934,6 +934,21 @@ fn should_notify_owner_of_cancellation(previous_status: &str) -> bool {
     previous_status == "approved"
 }
 
+/// Whether a booking in this status may be hard-deleted.
+///
+/// Approved is the one status held back, and it is the whole point of the
+/// gate: an approved booking is a real, confirmed stay, and every other part
+/// of this app preserves confirmed history rather than erasing it — journal
+/// entries archive instead of deleting, accounts with any history block
+/// instead of deleting, and cancelling a booking keeps the row and changes its
+/// status. A hard delete here would be the one place that breaks the pattern.
+///
+/// The listed statuses are the rest of `bookings_status_valid` in
+/// `0001_core.sql`; that CHECK constraint is what keeps this exhaustive.
+fn is_deletable_status(status: &str) -> bool {
+    matches!(status, "pending" | "denied" | "cancelled")
+}
+
 /// What a delete took with it, so the panel can confirm what actually went
 /// rather than just saying "done".
 #[derive(Debug, Serialize)]
@@ -963,11 +978,10 @@ pub struct DeleteSummary {
 /// conversation survives with the link cleared, which is right: what was said
 /// stands on its own.
 ///
-/// Deliberately not guarded against deleting a confirmed upcoming stay. The
-/// admin already has unrestricted power over that booking through cancel, and
-/// forcing cancel-then-delete would add a step to the only workflow this
-/// exists for. Nothing is emailed either way, so the warning belongs in the
-/// panel, next to where the judgement is made.
+/// Approved bookings are refused outright — see `is_deletable_status`. The way
+/// to remove a confirmed stay is to cancel it first, which is unchanged and
+/// still emails the owner; the cancelled row is then eligible here like any
+/// other.
 pub async fn admin_delete(
     State(state): State<Shared>,
     AdminUser(_): AdminUser,
@@ -976,6 +990,14 @@ pub async fn admin_delete(
     let row = load_row(&state.db, id)
         .await?
         .ok_or_else(|| AppError::NotFound("Booking not found.".into()))?;
+
+    if !is_deletable_status(&row.booking.status) {
+        return Err(AppError::Conflict(
+            "Approved bookings can't be deleted directly — cancel it first if \
+             it needs to be removed."
+                .into(),
+        ));
+    }
 
     let mut tx = state.db.begin().await?;
     // Children first, for the foreign keys named above.
@@ -1043,6 +1065,29 @@ mod tests {
     // thing that could make the two diverge is this From impl silently
     // dropping or mis-mapping a field on the way in, which is what this
     // test guards against.
+    // The gate that keeps confirmed history from being erased. `approved` is
+    // the only status this must ever refuse, and the only one it does.
+    #[test]
+    fn an_approved_booking_cannot_be_deleted() {
+        assert!(!is_deletable_status("approved"));
+    }
+
+    #[test]
+    fn a_booking_that_is_not_a_confirmed_stay_can_be_deleted() {
+        assert!(is_deletable_status("pending"));
+        assert!(is_deletable_status("denied"));
+        assert!(is_deletable_status("cancelled"));
+    }
+
+    // An admin removing a confirmed stay is meant to cancel it first; this is
+    // the handoff between the two, and it only works because cancel leaves the
+    // row in a status the delete will accept.
+    #[test]
+    fn cancelling_a_confirmed_stay_makes_it_deletable() {
+        assert!(!is_deletable_status("approved"));
+        assert!(is_deletable_status("cancelled"));
+    }
+
     #[test]
     fn admin_create_feeds_create_booking_for_the_identical_request_a_guest_submission_would() {
         let admin_input = AdminCreateBooking {

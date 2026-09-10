@@ -472,8 +472,15 @@ export default function BookingsTab() {
                           className="text-clay"
                           // Cancel keeps the row and is what a called-off stay
                           // wants. This is for rows that shouldn't exist.
-                          title="Remove this booking from the record entirely"
-                          disabled={remove.isPending}
+                          // A confirmed stay is real history, so the API
+                          // refuses it outright — cancel is the way through,
+                          // and says so here rather than failing on click.
+                          title={
+                            b.status === 'approved'
+                              ? 'Cancel this booking first — a confirmed stay can’t be deleted directly'
+                              : 'Remove this booking from the record entirely'
+                          }
+                          disabled={remove.isPending || b.status === 'approved'}
                           onClick={() => setDeleting(b)}
                         >
                           <Trash2 size={14} />
@@ -603,15 +610,6 @@ export default function BookingsTab() {
                 .filter(Boolean)
                 .join(' and ')}
               . Messages about this stay are kept.
-            </p>
-          )}
-
-          {/* Nothing is emailed on a delete, unlike cancel — so an upcoming
-              stay would simply vanish from the guest's account. */}
-          {deleting?.status === 'approved' && (
-            <p className="rounded-lg border border-wood-300 bg-wood-100 px-3 py-2 text-xs text-wood-800">
-              This is a confirmed stay and the guest is <strong>not</strong> emailed. Use Cancel
-              instead if it was really booked and is being called off.
             </p>
           )}
 
