@@ -18,6 +18,21 @@ export const ROLE_LABELS: Record<Role, string> = {
 
 export type BookingStatus = 'pending' | 'approved' | 'denied' | 'cancelled';
 
+/**
+ * Which About tab a photo or story belongs to. 'camp' is the default, and
+ * what every gallery photo predating the split was backfilled to.
+ */
+export type AboutSection = 'camp' | 'dulac' | 'last_island';
+
+export const ABOUT_SECTIONS: AboutSection[] = ['camp', 'dulac', 'last_island'];
+
+/** Tab labels, in display order. */
+export const ABOUT_SECTION_LABELS: Record<AboutSection, string> = {
+  camp: 'About the Camp',
+  dulac: 'About Dulac',
+  last_island: 'Last Island',
+};
+
 export interface User {
   id: string;
   email: string;
@@ -156,7 +171,7 @@ export interface SiteContent {
   hero_image_url: string | null;
   rules: { id: string; text: string }[];
   amenities: { id: string; label: string; icon: string | null }[];
-  gallery: { id: string; url: string; caption: string | null }[];
+  gallery: { id: string; url: string; caption: string | null; about_section: AboutSection }[];
 }
 
 /**
@@ -220,6 +235,7 @@ export interface GalleryPhoto {
   id: string;
   url: string;
   caption: string | null;
+  about_section: AboutSection;
   sort_order: number;
   created_at: string;
 }

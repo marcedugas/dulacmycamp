@@ -144,6 +144,9 @@ pub struct GalleryPublic {
     pub id: Uuid,
     pub url: String,
     pub caption: Option<String>,
+    /// Which About tab this photo belongs to. The landing page groups on it
+    /// so each tab shows — and lightboxes through — only its own photos.
+    pub about_section: String,
 }
 
 /// Everything `GET /api/site-content` hands to an anonymous visitor.
@@ -186,7 +189,8 @@ pub async fn get_site_content(State(state): State<Shared>) -> ApiResult<Json<Pub
     .fetch_all(&state.db)
     .await?;
     let gallery = sqlx::query_as::<_, GalleryPublic>(
-        "SELECT id, url, caption FROM gallery_photos ORDER BY sort_order, created_at",
+        "SELECT id, url, caption, about_section FROM gallery_photos
+         ORDER BY sort_order, created_at",
     )
     .fetch_all(&state.db)
     .await?;
@@ -547,16 +551,34 @@ pub async fn delete_amenity(
 
 // ─────────────────────────── gallery ───────────────────────────
 
+/// Which About tab a photo hangs on. Mirrors
+/// `gallery_photos_about_section_valid` in migration 0013.
+///
+/// 'camp' is the default and the one existing photos were backfilled to: the
+/// gallery that predates the About split was always the camp's own.
+pub const ABOUT_SECTIONS: [&str; 3] = ["camp", "dulac", "last_island"];
+
+fn validate_section(section: &str) -> ApiResult<()> {
+    if !ABOUT_SECTIONS.contains(&section) {
+        return Err(AppError::BadRequest(format!(
+            "'{section}' is not an About section. Valid sections: {}.",
+            ABOUT_SECTIONS.join(", ")
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Serialize, FromRow)]
 pub struct GalleryPhotoItem {
     pub id: Uuid,
     pub url: String,
     pub caption: Option<String>,
+    pub about_section: String,
     pub sort_order: i32,
     pub created_at: DateTime<Utc>,
 }
 
-const GALLERY_COLUMNS: &str = "id, url, caption, sort_order, created_at";
+const GALLERY_COLUMNS: &str = "id, url, caption, about_section, sort_order, created_at";
 
 pub async fn list_gallery_admin(
     State(state): State<Shared>,
@@ -571,8 +593,10 @@ pub async fn list_gallery_admin(
 }
 
 /// `POST /api/admin/gallery` — admin only, multipart. Field name `file`,
-/// optional field name `caption`. New photos are appended to the end of the
-/// order — the admin reorders afterward if it needs to move.
+/// optional `caption`, optional `about_section` (defaults to `camp`, matching
+/// the column default and the behaviour before the About split). New photos
+/// are appended to the end of their section's order — the admin reorders
+/// afterward if it needs to move.
 pub async fn create_gallery_photo(
     State(state): State<Shared>,
     AdminUser(_): AdminUser,
@@ -580,6 +604,7 @@ pub async fn create_gallery_photo(
 ) -> ApiResult<Json<GalleryPhotoItem>> {
     let mut url = None;
     let mut caption = None;
+    let mut about_section = String::from("camp");
     while let Some(field) = multipart.next_field().await.map_err(bad_multipart)? {
         match field.name() {
             Some("file") => url = Some(save_upload(&state, field).await?),
@@ -587,18 +612,29 @@ pub async fn create_gallery_photo(
                 let text = field.text().await.map_err(bad_multipart)?;
                 caption = Some(text).filter(|s: &String| !s.trim().is_empty());
             }
+            Some("about_section") => {
+                let text = field.text().await.map_err(bad_multipart)?;
+                if !text.trim().is_empty() {
+                    about_section = text.trim().to_string();
+                }
+            }
             _ => {}
         }
     }
+    validate_section(&about_section)?;
     let url = url.ok_or_else(|| AppError::BadRequest("No file provided.".into()))?;
 
+    // Ordering is per section: a photo added to Last Island goes after Last
+    // Island's photos, not after whatever happens to sort highest overall.
     let row = sqlx::query_as::<_, GalleryPhotoItem>(&format!(
-        "INSERT INTO gallery_photos (url, caption, sort_order)
-         VALUES ($1, $2, COALESCE((SELECT max(sort_order) + 1 FROM gallery_photos), 0))
+        "INSERT INTO gallery_photos (url, caption, about_section, sort_order)
+         VALUES ($1, $2, $3, COALESCE(
+             (SELECT max(sort_order) + 1 FROM gallery_photos WHERE about_section = $3), 0))
          RETURNING {GALLERY_COLUMNS}"
     ))
     .bind(&url)
     .bind(caption)
+    .bind(&about_section)
     .fetch_one(&state.db)
     .await?;
     Ok(Json(row))
@@ -653,6 +689,29 @@ pub async fn delete_gallery_photo(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_three_about_sections_are_the_only_valid_ones() {
+        for section in ABOUT_SECTIONS {
+            assert!(
+                validate_section(section).is_ok(),
+                "{section} should be valid"
+            );
+        }
+        assert!(matches!(
+            validate_section("guest_photos"),
+            Err(AppError::BadRequest(_))
+        ));
+        assert!(matches!(validate_section(""), Err(AppError::BadRequest(_))));
+    }
+
+    // 'camp' is what migration 0013 backfilled every pre-existing photo to,
+    // and what an upload with no section falls back to — the two have to
+    // agree or old photos and new ones land in different places.
+    #[test]
+    fn camp_is_the_default_section() {
+        assert_eq!(ABOUT_SECTIONS[0], "camp");
+    }
 
     #[test]
     fn accepts_jpeg_png_webp() {
