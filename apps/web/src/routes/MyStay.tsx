@@ -5,11 +5,17 @@ import { useCheckinInfo, useGuestPhotosLink, useMyStay } from '../lib/queries';
 import { formatRange, nightCount, pluralNights } from '../lib/dates';
 
 /**
- * The shared camp album, for guests who have stayed.
+ * The shared camp album.
  *
- * Renders nothing at all when the guest isn't eligible (a 403, which the
+ * Renders nothing at all when the viewer isn't eligible (a 403, which the
  * query surfaces as an error) or when no admin has set a link yet (a null
  * url) — the two are different answers but call for the same empty page.
+ *
+ * Whether to show this is the API's decision, never this page's: eligibility
+ * is `role == 'user'` OR an ever-approved booking, which is deliberately
+ * wider than "has a stay to show". Mounting it outside the has-a-stay branch
+ * is what lets a family member with no bookings — the whole point of the
+ * family role — actually reach the album.
  */
 function CampPhotos() {
   const { data } = useGuestPhotosLink();
@@ -52,6 +58,8 @@ export default function MyStay() {
     );
   }
 
+  // No stay to show is not the same as nothing to show: the album is gated
+  // on its own, wider rule, so it renders in both branches.
   if (!stay?.has_stay) {
     return (
       <div className="mx-auto max-w-2xl px-4 py-10">
@@ -66,6 +74,8 @@ export default function MyStay() {
             <Button>Book a Stay</Button>
           </Link>
         </div>
+
+        <CampPhotos />
       </div>
     );
   }

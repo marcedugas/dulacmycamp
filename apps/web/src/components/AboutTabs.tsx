@@ -24,7 +24,7 @@ function Directions({ address }: { address: string | null }) {
 
   const href = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(trimmed)}`;
   return (
-    <Card className="mt-6 flex flex-wrap items-center justify-between gap-3">
+    <Card className="flex flex-wrap items-center justify-between gap-3">
       <p className="flex items-center gap-2 text-sm font-semibold text-charcoal">
         <MapPin size={16} className="shrink-0 text-forest-600" />
         {trimmed}
@@ -51,7 +51,7 @@ function PhotoGrid({
   if (photos.length === 0) {
     if (!showEmpty) return null;
     return (
-      <div className="mt-6 flex aspect-4/3 max-w-xs flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-sand bg-cream-dark/60 text-muted">
+      <div className="flex aspect-4/3 max-w-xs flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-sand bg-cream-dark/60 text-muted">
         <ImageIcon size={22} />
         <span className="text-xs font-semibold uppercase tracking-wide">Photos coming soon</span>
       </div>
@@ -59,7 +59,7 @@ function PhotoGrid({
   }
 
   return (
-    <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+    <div className="grid grid-cols-2 gap-3">
       {photos.map((g, i) => (
         <button
           key={g.id}
@@ -147,6 +147,11 @@ export function AboutTabs({
   const current = visible.includes(active) ? active : 'camp';
   const photos = photosBySection[current];
 
+  // A history tab with no photos yet would otherwise leave half the row
+  // blank; its text simply runs full width until someone adds one. The camp
+  // always has a right column — amenities, or the placeholder for them.
+  const hasRightColumn = current === 'camp' || photos.length > 0;
+
   const campFallback = `Family and friends only. The camp sleeps ${capacityAdults} adults comfortably — more with kids on the bunks.`;
   const body = current === 'camp' ? bodies.camp || campFallback : bodies[current];
 
@@ -177,56 +182,61 @@ export function AboutTabs({
         </div>
       )}
 
+      {/* One template for all three tabs: words on the left, pictures on the
+          right. Only the content differs between them — the camp adds its
+          amenities above its photos, and its address below its text. */}
       <div
         role="tabpanel"
         id={`about-panel-${current}`}
         aria-labelledby={`about-tab-${current}`}
-        className="mt-6"
+        className={cx('mt-6 grid gap-8', hasRightColumn && 'lg:grid-cols-2')}
       >
-        {body && (
-          <p className="max-w-prose whitespace-pre-wrap text-base leading-relaxed text-muted">
-            {body}
-          </p>
-        )}
+        <div className="space-y-6">
+          {body && (
+            <p className="max-w-prose whitespace-pre-wrap text-base leading-relaxed text-muted">
+              {body}
+            </p>
+          )}
+          {current === 'camp' && <Directions address={content?.camp_address ?? null} />}
+        </div>
 
-        {/* Amenities and directions describe the camp itself, so they stay
-            on its tab rather than repeating under the town's history. */}
-        {current === 'camp' && (
-          <div className="mt-6">
-            {isLoading ? (
-              <div className="flex justify-center py-10">
-                <Spinner />
-              </div>
-            ) : amenities.length === 0 ? (
-              <EmptyState
-                title="No amenities listed yet"
-                hint="Add some from the admin panel's Site Content tab."
-              />
-            ) : (
-              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                {amenities.map((a) => {
-                  const Icon = amenityIcon(a.icon);
-                  return (
-                    <Card key={a.id} className="flex items-center gap-3">
-                      <Icon className="shrink-0 text-forest-600" size={13} />
-                      <p className="font-semibold text-charcoal">{a.label}</p>
-                    </Card>
-                  );
-                })}
-              </div>
-            )}
+        {hasRightColumn && (
+          <div className="space-y-6">
+            {/* Amenities describe the camp itself, so they stay on its tab
+                rather than repeating under the town's history. */}
+            {current === 'camp' &&
+              (isLoading ? (
+                <div className="flex justify-center py-10">
+                  <Spinner />
+                </div>
+              ) : amenities.length === 0 ? (
+                <EmptyState
+                  title="No amenities listed yet"
+                  hint="Add some from the admin panel's Site Content tab."
+                />
+              ) : (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {amenities.map((a) => {
+                    const Icon = amenityIcon(a.icon);
+                    return (
+                      <Card key={a.id} className="flex items-center gap-3">
+                        <Icon className="shrink-0 text-forest-600" size={13} />
+                        <p className="font-semibold text-charcoal">{a.label}</p>
+                      </Card>
+                    );
+                  })}
+                </div>
+              ))}
+
+            <PhotoGrid
+              photos={photos}
+              onOpen={setLightbox}
+              // "Photos coming soon" belongs on the camp's own tab; the history
+              // tabs are prose first and simply carry no grid until they have one.
+              showEmpty={current === 'camp' && !isLoading}
+            />
           </div>
         )}
-
-        <PhotoGrid
-          photos={photos}
-          onOpen={setLightbox}
-          // "Photos coming soon" belongs on the camp's own tab; the history
-          // tabs are prose first and simply carry no grid until they have one.
-          showEmpty={current === 'camp' && !isLoading}
-        />
-
-        {current === 'camp' && <Directions address={content?.camp_address ?? null} />}
       </div>
 
       {/* Scoped to the visible tab: prev/next can only reach photos the
