@@ -1,5 +1,5 @@
 import { useQueries, useQuery } from '@tanstack/react-query';
-import { api } from './api';
+import { api, getToken } from './api';
 import type {
   AdminCheckout,
   AdminJournalEntry,
@@ -116,6 +116,10 @@ export function useGuestPhotosLink() {
     queryFn: () => api<GuestPhotosLink>('/guest-photos-link'),
     // A 403 is a settled answer, not a blip — retrying just delays it.
     retry: false,
+    // The landing page is public, and this endpoint needs a token to say
+    // anything but 401. Reading the token rather than the auth context keeps
+    // the hook usable from anywhere, including outside a provider.
+    enabled: Boolean(getToken()),
   });
 }
 
