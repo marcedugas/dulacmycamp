@@ -11,7 +11,14 @@ import {
   useRulesAdmin,
   useSiteSettingsAdmin,
 } from '../../lib/queries';
-import type { AmenityItem, GalleryPhoto, RuleItem, SiteSettingsAdmin } from '../../lib/types';
+import type {
+  AboutSection,
+  AmenityItem,
+  GalleryPhoto,
+  RuleItem,
+  SiteSettingsAdmin,
+} from '../../lib/types';
+import { ABOUT_SECTIONS, ABOUT_SECTION_LABELS } from '../../lib/types';
 
 const onError = (err: unknown) =>
   toast.error(err instanceof ApiError ? err.message : 'That action failed.');
@@ -540,7 +547,12 @@ function AmenitiesSection() {
 
 // ─────────────────────────── gallery ───────────────────────────
 
-function GallerySection() {
+/**
+ * One About section's photos. Rendered once per section, so which section an
+ * upload belongs to is implicit in which drop zone it was dropped on — no
+ * extra picker, and it matches how the single gallery already worked.
+ */
+function GallerySection({ section }: { section: AboutSection }) {
   const { data, isLoading } = useGalleryAdmin();
   const queryClient = useQueryClient();
   const invalidate = () => {
@@ -553,6 +565,7 @@ function GallerySection() {
     mutationFn: (file: File) => {
       const fd = new FormData();
       fd.append('file', file);
+      fd.append('about_section', section);
       return api<GalleryPhoto>('/admin/gallery', { method: 'POST', body: fd });
     },
     onSuccess: () => {
@@ -581,7 +594,8 @@ function GallerySection() {
     onError,
   });
 
-  const photos = data ?? [];
+  // Only this section's photos — reordering and removal stay inside it.
+  const photos = (data ?? []).filter((p) => p.about_section === section);
 
   const move = (index: number, direction: -1 | 1) => {
     const other = photos[index + direction];
@@ -703,9 +717,17 @@ export default function SiteContentTab() {
       <Section title="Amenities" subtitle="Shown on the landing page, in order.">
         <AmenitiesSection />
       </Section>
-      <Section title="Photo gallery" subtitle="Shown on the landing page, in order.">
-        <GallerySection />
-      </Section>
+      {/* One gallery per About tab. Photos that predate the split were
+          migrated to About the Camp, which is where they already appeared. */}
+      {ABOUT_SECTIONS.map((section) => (
+        <Section
+          key={section}
+          title={`${ABOUT_SECTION_LABELS[section]} — photos`}
+          subtitle="Shown on this section's tab on the landing page, in order."
+        >
+          <GallerySection section={section} />
+        </Section>
+      ))}
     </div>
   );
 }

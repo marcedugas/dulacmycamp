@@ -1,18 +1,9 @@
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { addDays, format } from 'date-fns';
-import {
-  ArrowRight,
-  CalendarDays,
-  CheckCircle2,
-  Image as ImageIcon,
-  MapPin,
-  Navigation,
-  PartyPopper,
-  XCircle,
-} from 'lucide-react';
+import { ArrowRight, CalendarDays, CheckCircle2, PartyPopper, XCircle } from 'lucide-react';
 import { buildIndex } from '../components/CampCalendar';
-import { Lightbox } from '../components/Lightbox';
+import { AboutTabs } from '../components/AboutTabs';
 import {
   FishingWidget,
   LunarWidget,
@@ -21,7 +12,6 @@ import {
 } from '../components/EnvironmentWidgets';
 import { Button, Card, EmptyState, Section, Spinner, cx } from '../components/ui';
 import { assetUrl } from '../lib/api';
-import { amenityIcon } from '../lib/icons';
 import { useCalendarData, useConfig, useSiteContent } from '../lib/queries';
 import { daysInclusive, formatRange, parseDay, toKey } from '../lib/dates';
 
@@ -158,35 +148,6 @@ function UpcomingEvents() {
   );
 }
 
-/**
- * The camp's location and a directions link, or nothing at all when no
- * address is set — an empty address means no text and no button, not an
- * empty state.
- *
- * Google Maps takes the destination as a plain query parameter and accepts a
- * street address and a bare "lat,lng" pair interchangeably, so whatever the
- * admin typed goes through url-encoded and unparsed. No key, no SDK.
- */
-function Directions({ address }: { address: string | null }) {
-  const trimmed = address?.trim();
-  if (!trimmed) return null;
-
-  const href = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(trimmed)}`;
-  return (
-    <Card className="mt-6 flex flex-wrap items-center justify-between gap-3">
-      <p className="flex items-center gap-2 text-sm font-semibold text-charcoal">
-        <MapPin size={16} className="shrink-0 text-forest-600" />
-        {trimmed}
-      </p>
-      <a href={href} target="_blank" rel="noreferrer noopener">
-        <Button size="sm" variant="secondary">
-          <Navigation size={14} /> Get Directions
-        </Button>
-      </a>
-    </Card>
-  );
-}
-
 export default function Landing() {
   const { data: config } = useConfig();
   const { data: content, isLoading } = useSiteContent();
@@ -197,16 +158,7 @@ export default function Landing() {
   const heroTitle = content?.hero_title ?? DEFAULT_HERO_TITLE;
   const heroSubtitle = content?.hero_subtitle ?? DEFAULT_HERO_SUBTITLE;
   const heroImageUrl = assetUrl(content?.hero_image_url);
-  const aboutCamp = content?.about_camp_text?.trim();
   const rules = content?.rules ?? [];
-  const amenities = content?.amenities ?? [];
-  const gallery = content?.gallery ?? [];
-  const aboutDulac = content?.about_dulac_text?.trim();
-  const lastIsland = content?.last_island_text?.trim();
-  const campAddress = content?.camp_address ?? null;
-
-  // Which gallery photo the lightbox is showing; null when it's closed.
-  const [lightbox, setLightbox] = useState<number | null>(null);
 
   return (
     <>
@@ -254,95 +206,11 @@ export default function Landing() {
         <AvailabilityWidget />
       </div>
 
-      <Section
-        title="About the camp"
-        subtitle={
-          aboutCamp ||
-          `Family and friends only. The camp sleeps ${config?.capacity_adults ?? 10} adults comfortably — more with kids on the bunks.`
-        }
-        id="about"
-      >
-        {isLoading ? (
-          <div className="flex justify-center py-10">
-            <Spinner />
-          </div>
-        ) : amenities.length === 0 ? (
-          <EmptyState title="No amenities listed yet" hint="Add some from the admin panel's Site Content tab." />
-        ) : (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {amenities.map((a) => {
-              const Icon = amenityIcon(a.icon);
-              return (
-                <Card key={a.id} className="flex items-center gap-3">
-                  <Icon className="shrink-0 text-forest-600" size={20} />
-                  <p className="font-semibold text-charcoal">{a.label}</p>
-                </Card>
-              );
-            })}
-          </div>
-        )}
-
-        {/* Gallery. */}
-        <div className="mt-6">
-          {gallery.length > 0 ? (
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              {gallery.map((g, i) => (
-                <button
-                  key={g.id}
-                  type="button"
-                  onClick={() => setLightbox(i)}
-                  aria-label={g.caption ? `View ${g.caption}` : 'View photo'}
-                  className="group relative aspect-4/3 cursor-zoom-in overflow-hidden rounded-xl border border-sand bg-cream-dark/60"
-                >
-                  <img
-                    src={assetUrl(g.url) ?? undefined}
-                    alt={g.caption ?? ''}
-                    className="h-full w-full object-cover transition group-hover:scale-105"
-                  />
-                  {g.caption && (
-                    <figcaption className="absolute inset-x-0 bottom-0 bg-charcoal/70 px-2 py-1 text-xs font-semibold text-cream">
-                      {g.caption}
-                    </figcaption>
-                  )}
-                </button>
-              ))}
-            </div>
-          ) : (
-            !isLoading && (
-              <div className="flex aspect-4/3 max-w-xs flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-sand bg-cream-dark/60 text-muted">
-                <ImageIcon size={22} />
-                <span className="text-xs font-semibold uppercase tracking-wide">Photos coming soon</span>
-              </div>
-            )
-          )}
-        </div>
-
-        <Directions address={campAddress} />
-      </Section>
-
-      {/* The town, then the island it lost. Both hidden until an admin
-          writes them — an empty heading over nothing helps no one. */}
-      {aboutDulac && (
-        <div className="bg-cream-dark/50">
-          <Section title="About Dulac" id="about-dulac">
-            <Card>
-              <p className="whitespace-pre-wrap text-sm leading-relaxed text-charcoal">
-                {aboutDulac}
-              </p>
-            </Card>
-          </Section>
-        </div>
-      )}
-
-      {lastIsland && (
-        <Section title="Last Island" id="last-island">
-          <Card>
-            <p className="whitespace-pre-wrap text-sm leading-relaxed text-charcoal">
-              {lastIsland}
-            </p>
-          </Card>
-        </Section>
-      )}
+      <AboutTabs
+        content={content}
+        isLoading={isLoading}
+        capacityAdults={config?.capacity_adults ?? 10}
+      />
 
       <div className="bg-cream-dark/50">
         <Section title="House rules" subtitle="Short list. Leave it better than you found it.">
@@ -398,12 +266,6 @@ export default function Landing() {
         </Section>
       </div>
 
-      <Lightbox
-        photos={gallery}
-        index={lightbox}
-        onClose={() => setLightbox(null)}
-        onNavigate={setLightbox}
-      />
     </>
   );
 }
