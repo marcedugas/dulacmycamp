@@ -1,6 +1,21 @@
 /** Mirrors the JSON the Rust API serialises. Dates are ISO strings. */
 
-export type Role = 'guest' | 'admin';
+/**
+ * The roles an account can hold. "user" is the family tier: full family-level
+ * access with no booking history required, ever. Self-registration still
+ * lands people as "guest"; only an admin promotes.
+ */
+export type Role = 'guest' | 'user' | 'admin';
+
+export const ROLES: Role[] = ['guest', 'user', 'admin'];
+
+/** How each role reads, for the admin panel. */
+export const ROLE_LABELS: Record<Role, string> = {
+  guest: 'Guest',
+  user: 'Family',
+  admin: 'Admin',
+};
+
 export type BookingStatus = 'pending' | 'approved' | 'denied' | 'cancelled';
 
 export interface User {
@@ -136,13 +151,33 @@ export interface SiteContent {
 }
 
 /**
- * The camp photo album — GET /api/guest-photos-link. Auth-gated and limited
- * to guests with an approved booking, so this is a separate fetch rather than
- * part of the public `SiteContent` payload. `url` is null when no admin has
- * set a link yet; a guest with no approved stay gets a 403 instead.
+ * The camp photo album — GET /api/guest-photos-link. Auth-gated, so it is a
+ * separate fetch rather than part of the public `SiteContent` payload. Who
+ * gets in is admin-configured (see {@link ContentAccessSection}): by default
+ * the "user" family role, plus anyone who has ever had a booking approved.
+ * `url` is null when no admin has set a link yet; anyone not admitted gets a
+ * 403 instead.
  */
 export interface GuestPhotosLink {
   url: string | null;
+}
+
+/**
+ * One gated section and who may see it — GET /api/admin/content-access.
+ *
+ * `configurable: false` marks a section whose rule turns on a booking rather
+ * than a role (writing a journal entry, check-in info). It is listed so the
+ * admin sees the whole picture, but the server refuses edits to it.
+ */
+export interface ContentAccessSection {
+  section_key: string;
+  label: string;
+  description: string;
+  allowed_roles: Role[];
+  approved_booking_grants: boolean;
+  configurable: boolean;
+  sort_order: number;
+  updated_at: string;
 }
 
 /** Admin-only read of the editable settings — GET /api/admin/site-content/settings. */

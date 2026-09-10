@@ -135,6 +135,22 @@ pub async fn set_password_hash(db: &sqlx::PgPool, id: Uuid, hash: &str) -> Resul
         .map(|_| ())
 }
 
+/// Whether this account has ever had a booking approved — the "has actually
+/// stayed here" test, with no date or checkout condition on it.
+///
+/// Lives here rather than in one caller because it is a fact about a person,
+/// not about a section: [`crate::content_access`] asks it for any section
+/// whose `approved_booking_grants` is set.
+pub async fn has_approved_booking(db: &sqlx::PgPool, user_id: Uuid) -> Result<bool, sqlx::Error> {
+    let (ever,): (bool,) = sqlx::query_as(
+        "SELECT EXISTS(SELECT 1 FROM bookings WHERE user_id = $1 AND status = 'approved')",
+    )
+    .bind(user_id)
+    .fetch_one(db)
+    .await?;
+    Ok(ever)
+}
+
 /// The single admin used as the fallback recipient for guest messages and
 /// booking notifications.
 pub async fn first_admin(db: &sqlx::PgPool) -> Result<Option<User>, sqlx::Error> {
@@ -282,10 +298,11 @@ pub async fn update_role(
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateRole>,
 ) -> ApiResult<Json<User>> {
-    if body.role != "guest" && body.role != "admin" {
-        return Err(AppError::BadRequest(
-            "Role must be 'guest' or 'admin'.".into(),
-        ));
+    if !crate::content_access::ASSIGNABLE_ROLES.contains(&body.role.as_str()) {
+        return Err(AppError::BadRequest(format!(
+            "Role must be one of: {}.",
+            crate::content_access::ASSIGNABLE_ROLES.join(", ")
+        )));
     }
     // Guard against an admin locking themselves out of the admin panel.
     if actor.id == id && body.role != "admin" {
@@ -294,7 +311,7 @@ pub async fn update_role(
         ));
     }
 
-    // Dropping to guest drops any password with it. Password login re-checks
+    // Dropping out of admin drops any password with it. Password login re-checks
     // the role on every attempt, so a leftover hash would already be inert —
     // but a credential nobody can use is a credential worth not keeping.
     let updated = sqlx::query_as::<_, User>(&format!(
@@ -542,6 +559,24 @@ mod tests {
     fn blocked_at_is_what_makes_an_account_blocked() {
         assert!(!user("guest", false).is_blocked());
         assert!(user("guest", true).is_blocked());
+    }
+
+    // "user" is a family tier, not a step toward admin. It must not pick up
+    // admin powers, and it must not see other guests' identities — that stays
+    // with admins and the camp owner.
+    #[test]
+    fn the_family_role_is_not_an_admin_and_sees_no_guest_details() {
+        let family = user("user", false);
+        assert!(!family.is_admin());
+        assert!(!family.sees_guest_details());
+    }
+
+    #[test]
+    fn the_family_role_can_be_blocked_and_deleted_like_any_non_admin() {
+        // Only admin accounts are shielded from blocking/deletion; promoting
+        // someone to family must not accidentally shield them too.
+        assert!(require_blockable(&user("user", false)).is_ok());
+        assert!(require_deletable(&user("user", false), &HistoryCounts::default()).is_ok());
     }
 
     // ─────────────── who may be blocked ───────────────

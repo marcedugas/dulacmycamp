@@ -10,6 +10,7 @@ import type {
   CheckinInfoItem,
   ChecklistItem,
   CheckoutEligibleBooking,
+  ContentAccessSection,
   GalleryPhoto,
   GuestPhotosLink,
   Holiday,
@@ -127,6 +128,14 @@ export function useSiteSettingsAdmin() {
   return useQuery({
     queryKey: ['admin-site-settings'],
     queryFn: () => api<SiteSettingsAdmin>('/admin/site-content/settings'),
+  });
+}
+
+/** Admin-only: every gated section and which roles may see it. */
+export function useContentAccess() {
+  return useQuery({
+    queryKey: ['admin-content-access'],
+    queryFn: () => api<ContentAccessSection[]>('/admin/content-access'),
   });
 }
 

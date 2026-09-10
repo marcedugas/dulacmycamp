@@ -2,12 +2,13 @@ import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { format } from 'date-fns';
 import { toast } from 'sonner';
-import { Ban, Crown, RotateCcw, ShieldCheck, ShieldOff, Trash2 } from 'lucide-react';
+import { Ban, Crown, RotateCcw, Trash2 } from 'lucide-react';
 import { Button, EmptyState, Modal, Spinner, cx } from '../../components/ui';
 import { api, ApiError } from '../../lib/api';
 import { useUsers } from '../../lib/queries';
 import { useAuth } from '../../lib/auth';
-import type { UserWithStats } from '../../lib/types';
+import type { Role, UserWithStats } from '../../lib/types';
+import { ROLE_LABELS, ROLES } from '../../lib/types';
 
 /** Everything a hard delete would destroy. The API refuses the delete unless
  *  this is zero, so it is also what decides whether the button is offered. */
@@ -25,7 +26,7 @@ export default function UsersTab() {
   const [confirmDelete, setConfirmDelete] = useState<UserWithStats | null>(null);
 
   const setRole = useMutation({
-    mutationFn: ({ id, role }: { id: string; role: 'guest' | 'admin' }) =>
+    mutationFn: ({ id, role }: { id: string; role: Role }) =>
       api(`/users/${id}/role`, { method: 'PUT', body: { role } }),
     onSuccess: () => {
       toast.success('Role updated.');
@@ -146,13 +147,15 @@ export default function UsersTab() {
                     <div className="flex flex-wrap items-center gap-1.5">
                       <span
                         className={cx(
-                          'rounded-full border px-2 py-0.5 text-xs font-semibold capitalize',
+                          'rounded-full border px-2 py-0.5 text-xs font-semibold',
                           admin
                             ? 'border-forest-300 bg-forest-100 text-forest-800'
-                            : 'border-sand bg-cream-dark text-muted',
+                            : u.role === 'user'
+                              ? 'border-bayou-300 bg-bayou-100 text-bayou-800'
+                              : 'border-sand bg-cream-dark text-muted',
                         )}
                       >
-                        {u.role}
+                        {ROLE_LABELS[u.role as Role] ?? u.role}
                       </span>
                       {u.is_owner && (
                         <span
@@ -193,24 +196,28 @@ export default function UsersTab() {
                       >
                         <Crown size={14} /> {u.is_owner ? 'Remove Owner' : 'Make Owner'}
                       </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
+                      {/* Three tiers no longer fit an on/off button. Family
+                          ("user") is a sideways move from guest, not a step
+                          toward admin, so nothing here implies an order. */}
+                      <select
+                        aria-label={`Role for ${u.full_name ?? u.email}`}
+                        value={u.role}
                         // An admin can't demote themselves — the server rejects it too.
                         disabled={isMe || setRole.isPending}
-                        title={isMe ? 'You cannot change your own role' : undefined}
-                        onClick={() => setRole.mutate({ id: u.id, role: admin ? 'guest' : 'admin' })}
+                        title={
+                          isMe
+                            ? 'You cannot change your own role'
+                            : 'Family accounts need no booking to keep their access'
+                        }
+                        onChange={(e) => setRole.mutate({ id: u.id, role: e.target.value as Role })}
+                        className="rounded-lg border border-sand bg-white px-2 py-1.5 text-xs font-semibold text-charcoal disabled:opacity-50"
                       >
-                        {admin ? (
-                          <>
-                            <ShieldOff size={14} /> Remove Admin
-                          </>
-                        ) : (
-                          <>
-                            <ShieldCheck size={14} /> Make Admin
-                          </>
-                        )}
-                      </Button>
+                        {ROLES.map((r) => (
+                          <option key={r} value={r}>
+                            {ROLE_LABELS[r]}
+                          </option>
+                        ))}
+                      </select>
                       <Button
                         size="sm"
                         variant="ghost"
