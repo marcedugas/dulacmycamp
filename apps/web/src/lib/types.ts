@@ -107,6 +107,16 @@ export interface Booking {
   checkout_notes?: string;
   journal_id?: string;
   journal_status?: JournalStatus;
+  /** The booker's own visibility preference — true keeps their name off other
+   *  people's calendars. Same visibility as guest_name etc.: present for the
+   *  booking's owner and admins, which is everyone who can change it. */
+  is_private?: boolean;
+  /** Present only when the calendar may name this stay's booker: a signed-in
+   *  viewer, an approved booking, and `is_private` false. Its presence is the
+   *  whole signal — absent means render the stay anonymously, exactly as every
+   *  stay rendered before this field existed. Never sent to anonymous
+   *  visitors, whatever the booker chose. */
+  guest_first_name?: string;
 }
 
 export interface Capacity {

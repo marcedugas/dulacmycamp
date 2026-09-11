@@ -21,14 +21,6 @@ fn app_url(state: &Shared) -> &str {
     state.cfg.frontend_url.trim_end_matches('/')
 }
 
-/// First token of a full name, for the public feed — never the email.
-fn first_name(full_name: Option<&str>) -> String {
-    full_name
-        .and_then(|n| n.split_whitespace().next())
-        .unwrap_or("A guest")
-        .to_string()
-}
-
 /// Whether a booking qualifies to receive a journal entry: approved, the
 /// stay has *started* (`check_in <= today` — mid-stay, departure day, or
 /// well after all count), and no entry exists for it yet. Whether checkout
@@ -178,7 +170,7 @@ pub async fn list_public(
             body: r.body,
             created_at: r.created_at,
             approved_at: r.approved_at,
-            guest_first_name: first_name(r.full_name.as_deref()),
+            guest_first_name: users::first_name(r.full_name.as_deref()),
             check_in: r.check_in,
             check_out: r.check_out,
         })
@@ -722,13 +714,5 @@ mod tests {
                 Err(AppError::Conflict(_))
             ));
         }
-    }
-
-    #[test]
-    fn first_name_takes_only_the_first_token() {
-        assert_eq!(first_name(Some("Jean Dugas")), "Jean");
-        assert_eq!(first_name(Some("Cher")), "Cher");
-        assert_eq!(first_name(None), "A guest");
-        assert_eq!(first_name(Some("  ")), "A guest");
     }
 }

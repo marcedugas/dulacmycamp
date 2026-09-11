@@ -29,7 +29,8 @@ const LATE_CANCEL_HOURS: i64 = 48;
 /// Booking columns, minus `approve_token*` — those never leave the server.
 const BOOKING_COLUMNS: &str = "id, user_id, check_in, check_out, guest_count_adults, \
                                guest_count_kids, has_pets, other_requests, status, \
-                               denied_reason, approved_at, approved_by, created_at, updated_at";
+                               denied_reason, approved_at, approved_by, is_private, \
+                               created_at, updated_at";
 
 #[derive(Debug, Clone, Serialize, FromRow)]
 pub struct Booking {
@@ -45,6 +46,9 @@ pub struct Booking {
     pub denied_reason: Option<String>,
     pub approved_at: Option<DateTime<Utc>>,
     pub approved_by: Option<String>,
+    /// Whether the booker has kept their identity off other people's
+    /// calendars. Defaults to true — see `0014_booking_privacy.sql`.
+    pub is_private: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -66,10 +70,22 @@ struct BookingRow {
 
 /// What a given caller is allowed to see about a booking.
 ///
-/// Public callers and other guests get dates and head-count only — the calendar
-/// shows that the camp is taken, never by whom. Identities are unlocked for the
-/// booking's own guest, for admins, and for the camp owner
-/// (`User::sees_guest_details`).
+/// Two independent visibility rules live here, and they answer different
+/// questions:
+///
+///   * `full` — the administrative view: name, email, pets, requests,
+///     checkout notes. The booking's own guest, admins, and the camp owner
+///     (`User::sees_guest_details`). Unchanged by the privacy toggle, because
+///     it is not the calendar: an admin arbitrating overlaps has always had
+///     to know who is asking.
+///   * [`shows_booker`] — the *calendar's* view of who is coming, which the
+///     booker themselves controls. Nobody sees a booker's name through this
+///     field unless that booker chose to be seen.
+///
+/// The two are deliberately not the same switch. Making `full` respect the
+/// toggle would break the owner's approval workflow; making `shows_booker`
+/// follow `full` would mean a name the booker kept private still reached
+/// every admin's calendar.
 #[derive(Debug, Serialize)]
 pub struct BookingView {
     pub id: Uuid,
@@ -108,6 +124,40 @@ pub struct BookingView {
     pub journal_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub journal_status: Option<String>,
+    /// The booker's own privacy setting, for the surfaces that let them
+    /// change it (`/my-bookings`). Same `full` visibility as the rest — this
+    /// is a preference, and only the people who can already see the booking's
+    /// details have any use for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_private: Option<bool>,
+    /// Who is at the camp these nights, first name only — present *only*
+    /// when [`shows_booker`] says so. Its presence is the entire signal the
+    /// calendar keys off: absent means render the stay exactly as an
+    /// anonymous "Booked" cell, which is what every stay looked like before
+    /// this field existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guest_first_name: Option<String>,
+}
+
+/// Whether the calendar may name the person on this stay.
+///
+/// All three conditions have to hold, and each rules out a different way the
+/// feature could leak someone:
+///
+///   * `viewer_signed_in` — the public calendar never names anyone. Opting
+///     in makes a booker visible to *registered family*, not to the internet,
+///     so an anonymous visitor sees the same anonymous "Booked" cell they
+///     always have regardless of what the booker chose.
+///   * `!is_private` — the booker's own choice, and the one that defaults to
+///     withholding.
+///   * approved — a request nobody has said yes to yet is not news about who
+///     is coming to the camp. Pending stays still block their nights on the
+///     calendar; they just do it anonymously until they are real.
+///
+/// Pure so the rule is testable as a rule, rather than only reachable through
+/// a database and an HTTP request.
+fn shows_booker(viewer_signed_in: bool, is_private: bool, status: &str) -> bool {
+    viewer_signed_in && !is_private && status == "approved"
 }
 
 impl BookingRow {
@@ -142,6 +192,14 @@ impl BookingRow {
             checkout_notes: full.then(|| self.checkout_notes.clone()).flatten(),
             journal_id: full.then_some(self.journal_id).flatten(),
             journal_status: full.then(|| self.journal_status.clone()).flatten(),
+            is_private: full.then_some(b.is_private),
+            // `users::first_name` and not `guest_name`: the journal feed
+            // already settled how a guest is named to other people, and a
+            // cousin should read as the same "Jean" on the calendar as on
+            // their story. It also never falls back to the email the way the
+            // admin-facing `guest_name` above does.
+            guest_first_name: shows_booker(viewer.is_some(), b.is_private, &b.status)
+                .then(|| users::first_name(self.guest_name.as_deref())),
         }
     }
 }
@@ -295,6 +353,13 @@ async fn approved_adults(
 
 // ─────────────────────────── create ───────────────────────────
 
+/// The default every path that omits the field falls back to. `#[serde(default)]`
+/// would give `false` — the exposing answer — so the default is spelled out
+/// here, matching `0014_booking_privacy.sql`'s `DEFAULT true`.
+fn private_by_default() -> bool {
+    true
+}
+
 #[derive(Debug, PartialEq, Deserialize)]
 pub struct CreateBooking {
     pub check_in: NaiveDate,
@@ -305,6 +370,10 @@ pub struct CreateBooking {
     #[serde(default)]
     pub has_pets: bool,
     pub other_requests: Option<String>,
+    /// Whether to keep the booker's name off other family members' calendars.
+    /// Absent means private — see [`private_by_default`].
+    #[serde(default = "private_by_default")]
+    pub is_private: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -417,8 +486,8 @@ pub async fn create_booking_for(
     let booking = sqlx::query_as::<_, Booking>(&format!(
         "INSERT INTO bookings
            (user_id, check_in, check_out, guest_count_adults, guest_count_kids,
-            has_pets, other_requests, approve_token, approve_token_expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now() + ($9 || ' hours')::interval)
+            has_pets, other_requests, is_private, approve_token, approve_token_expires_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now() + ($10 || ' hours')::interval)
          RETURNING {BOOKING_COLUMNS}"
     ))
     .bind(user.id)
@@ -433,6 +502,7 @@ pub async fn create_booking_for(
             .map(str::trim)
             .filter(|s| !s.is_empty()),
     )
+    .bind(body.is_private)
     .bind(&token)
     .bind(APPROVE_TOKEN_TTL_HOURS.to_string())
     .fetch_one(&state.db)
@@ -520,6 +590,11 @@ pub struct AdminCreateBooking {
     #[serde(default)]
     pub has_pets: bool,
     pub other_requests: Option<String>,
+    /// Same choice, same default as the guest's own form — an admin entering
+    /// a booking on someone's behalf is making the decision *for* them, so
+    /// the quiet answer has to be the private one here too.
+    #[serde(default = "private_by_default")]
+    pub is_private: bool,
 }
 
 /// The only place `AdminCreateBooking` and `CreateBooking` are made to line
@@ -534,6 +609,7 @@ impl From<AdminCreateBooking> for CreateBooking {
             guest_count_kids: admin.guest_count_kids,
             has_pets: admin.has_pets,
             other_requests: admin.other_requests,
+            is_private: admin.is_private,
         }
     }
 }
@@ -672,6 +748,61 @@ pub async fn admin_update_guests(
         .await?
         .ok_or_else(|| AppError::NotFound("Booking not found.".into()))?;
     Ok(Json(updated.to_view(Some(&admin))))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdatePrivacy {
+    pub is_private: bool,
+}
+
+/// `PUT /api/bookings/{id}/privacy` — the booker's own switch.
+///
+/// Deliberately not gated on status, unlike every other write in this module.
+/// The rest of them are steps in the approval workflow and only make sense at
+/// a particular point in it; this is a standing preference about the person,
+/// and someone who decides they would rather not be listed should not have to
+/// find out their booking is in the wrong state to say so. Changing it on a
+/// pending or cancelled stay simply has no visible effect yet — `shows_booker`
+/// already withholds the name until a stay is approved.
+///
+/// It also, uniquely, notifies nobody: no email, no inbox message. Those exist
+/// so a *guest* learns what the camp did to their booking. Here the guest is
+/// the one acting, on their own row, and telling them what they just did — or
+/// telling the owner, who does not need a feed of who is feeling private this
+/// week — would be noise.
+///
+/// Admins may set it too, for the booking they entered on someone's behalf;
+/// the ownership check below is the same one `cancel` uses.
+pub async fn update_privacy(
+    State(state): State<Shared>,
+    AuthUser(user): AuthUser,
+    Path(id): Path<Uuid>,
+    Json(body): Json<UpdatePrivacy>,
+) -> ApiResult<Json<BookingView>> {
+    let row = load_row(&state.db, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Booking not found.".into()))?;
+
+    if row.booking.user_id != user.id && !user.is_admin() {
+        return Err(AppError::Forbidden("That isn't your booking.".into()));
+    }
+
+    let booking = sqlx::query_as::<_, Booking>(&format!(
+        "UPDATE bookings SET is_private = $2, updated_at = now()
+         WHERE id = $1 RETURNING {BOOKING_COLUMNS}"
+    ))
+    .bind(id)
+    .bind(body.is_private)
+    .fetch_one(&state.db)
+    .await?;
+
+    tracing::info!(
+        booking_id = %id,
+        is_private = body.is_private,
+        "booking privacy changed",
+    );
+
+    Ok(Json(BookingRow { booking, ..row }.to_view(Some(&user))))
 }
 
 // ─────────────────────────── state transitions ───────────────────────────
@@ -1217,6 +1348,64 @@ mod tests {
         ));
     }
 
+    // ── who the calendar may name ──
+    //
+    // `shows_booker` is the whole of Step D's rule. Each test below pins one
+    // of the three ways it can say no.
+
+    #[test]
+    fn an_approved_public_booking_is_named_to_a_signed_in_viewer() {
+        assert!(shows_booker(true, false, "approved"));
+    }
+
+    #[test]
+    fn a_private_booking_is_never_named() {
+        assert!(!shows_booker(true, true, "approved"));
+        assert!(!shows_booker(false, true, "approved"));
+    }
+
+    // The public calendar is not what anyone opted in to. Choosing to be
+    // visible to registered family must not make someone visible to a
+    // stranger who never signed in.
+    #[test]
+    fn an_anonymous_visitor_is_never_shown_a_name_however_public_the_booking() {
+        assert!(!shows_booker(false, false, "approved"));
+    }
+
+    // A request the owner has not said yes to yet is not news about who is
+    // coming; it still blocks its nights, just anonymously.
+    #[test]
+    fn a_booking_that_is_not_yet_approved_is_not_named_even_when_public() {
+        for status in ["pending", "denied", "cancelled"] {
+            assert!(!shows_booker(true, false, status));
+        }
+    }
+
+    // The default is the one that matters most: a booking created without the
+    // field, by any path, must land private. `private_by_default` is what the
+    // serde defaults on both request bodies resolve to, and it mirrors the
+    // column's own `DEFAULT true`.
+    #[test]
+    fn omitting_the_choice_entirely_yields_a_private_booking() {
+        assert!(private_by_default());
+        let submitted: CreateBooking = serde_json::from_str(
+            r#"{"check_in":"2026-10-01","check_out":"2026-10-05","guest_count_adults":2}"#,
+        )
+        .expect("a form that predates the toggle still deserialises");
+        assert!(submitted.is_private);
+        assert!(!shows_booker(true, submitted.is_private, "approved"));
+    }
+
+    #[test]
+    fn an_admin_entering_a_booking_also_defaults_it_to_private() {
+        let entered: AdminCreateBooking = serde_json::from_str(
+            r#"{"email":"guest@example.com","check_in":"2026-10-01","check_out":"2026-10-05","guest_count_adults":2}"#,
+        )
+        .expect("the admin form's older shape still deserialises");
+        assert!(entered.is_private);
+        assert!(CreateBooking::from(entered).is_private);
+    }
+
     #[test]
     fn an_approved_booking_cannot_be_deleted() {
         assert!(!is_deletable_status("approved"));
@@ -1249,6 +1438,7 @@ mod tests {
             guest_count_kids: 2,
             has_pets: true,
             other_requests: Some("Bringing a boat trailer".into()),
+            is_private: false,
         };
         let expected = CreateBooking {
             check_in: NaiveDate::from_ymd_opt(2026, 10, 1).unwrap(),
@@ -1257,6 +1447,7 @@ mod tests {
             guest_count_kids: 2,
             has_pets: true,
             other_requests: Some("Bringing a boat trailer".into()),
+            is_private: false,
         };
         assert_eq!(CreateBooking::from(admin_input), expected);
     }

@@ -75,6 +75,22 @@ impl User {
     }
 }
 
+/// First token of a full name — "Jean Dugas" reads as "Jean", and a missing
+/// or blank name as "A guest". Never the email address, which is the point:
+/// these are the surfaces where someone's identity is shown to *other*
+/// people, so they get a first name or nothing that identifies anyone.
+///
+/// The single convention behind every such surface. `crate::journal` set it
+/// for the public story feed; `crate::bookings` reuses it verbatim for the
+/// name on a calendar stay the booker chose to make visible, so the same
+/// person reads the same way in both places.
+pub fn first_name(full_name: Option<&str>) -> String {
+    full_name
+        .and_then(|n| n.split_whitespace().next())
+        .unwrap_or("A guest")
+        .to_string()
+}
+
 /// Columns shared by every `users` read, so row shapes never drift.
 ///
 /// `password_hash` is deliberately absent: only its presence is exposed, as
@@ -523,6 +539,16 @@ pub async fn remove(
 mod tests {
     use super::*;
     use axum::response::IntoResponse;
+
+    // The one first-name convention shared by the journal feed and the
+    // calendar's visible stays — see `first_name`.
+    #[test]
+    fn first_name_takes_only_the_first_token() {
+        assert_eq!(first_name(Some("Jean Dugas")), "Jean");
+        assert_eq!(first_name(Some("Cher")), "Cher");
+        assert_eq!(first_name(None), "A guest");
+        assert_eq!(first_name(Some("  ")), "A guest");
+    }
 
     fn user(role: &str, blocked: bool) -> User {
         let now = Utc::now();

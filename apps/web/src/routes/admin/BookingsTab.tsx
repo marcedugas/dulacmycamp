@@ -16,6 +16,7 @@ import {
   Textarea,
   cx,
 } from '../../components/ui';
+import { ReservationVisibility } from '../../components/ReservationVisibility';
 import { api, ApiError } from '../../lib/api';
 import { useAdminCheckouts, useBookings, useUsers } from '../../lib/queries';
 import { formatRange, nightCount, parseDay, pluralNights, toKey } from '../../lib/dates';
@@ -73,6 +74,9 @@ function AddBookingModal({
   const [kids, setKids] = useState(0);
   const [pets, setPets] = useState(false);
   const [requests, setRequests] = useState('');
+  // Same default as the guest's own form — an admin entering a booking is
+  // deciding for someone else, so the quiet answer has to be the private one.
+  const [isPrivate, setIsPrivate] = useState(true);
   const [result, setResult] = useState<CreateBookingResponse | null>(null);
 
   const trimmedEmail = email.trim().toLowerCase();
@@ -90,6 +94,7 @@ function AddBookingModal({
     setKids(0);
     setPets(false);
     setRequests('');
+    setIsPrivate(true);
     setResult(null);
   };
 
@@ -106,6 +111,7 @@ function AddBookingModal({
           guest_count_kids: kids,
           has_pets: pets,
           other_requests: requests.trim() || null,
+          is_private: isPrivate,
         },
       }),
     onSuccess: (res) => {
@@ -225,6 +231,18 @@ function AddBookingModal({
           <Field label="Other requests" hint="Optional">
             <Textarea rows={2} value={requests} onChange={(e) => setRequests(e.target.value)} />
           </Field>
+
+          {/* The same block the guest's own form shows, in the same place:
+              directly before the submit. An admin booking on someone's behalf
+              is making this call *for* them, so it is the one form where a
+              quieter version would be most wrong. The guest can change it
+              afterwards from /my-bookings. */}
+          <ReservationVisibility
+            value={isPrivate}
+            onChange={setIsPrivate}
+            forGuest
+            name="admin-reservation-visibility"
+          />
 
           <div className="flex justify-end gap-2">
             <Button type="button" variant="ghost" onClick={close}>

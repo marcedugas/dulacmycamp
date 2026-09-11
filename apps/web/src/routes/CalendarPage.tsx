@@ -64,9 +64,12 @@ export default function CalendarPage() {
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-10">
+      {/* The old subtitle promised names were never shown, which is no longer
+          unconditionally true. The part people actually rely on still is, so
+          it leads: private is the default and what most stays will be. */}
       <PageHeader
         title="Camp calendar"
-        subtitle="Approved stays show as booked. Names stay private."
+        subtitle="Approved stays show as booked. A name appears only when that booker chose to share it."
         actions={
           <Button variant="ghost" onClick={() => void handleExport()}>
             <Download size={16} /> Export PDF

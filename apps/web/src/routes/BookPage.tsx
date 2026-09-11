@@ -6,6 +6,7 @@ import { toast } from 'sonner';
 import { CheckCircle2, Fish, Info, Lock, TriangleAlert, Users } from 'lucide-react';
 import { buildIndex } from '../components/CampCalendar';
 import { Button, Card, CountInput, Field, Input, PageHeader, Textarea, cx } from '../components/ui';
+import { ReservationVisibility } from '../components/ReservationVisibility';
 import { api, ApiError } from '../lib/api';
 import { useCalendarData } from '../lib/queries';
 import { daysInclusive, formatRange, nightCount, parseDay, pluralNights, toKey } from '../lib/dates';
@@ -23,6 +24,8 @@ export default function BookPage() {
   const [kids, setKids] = useState(0);
   const [pets, setPets] = useState(false);
   const [requests, setRequests] = useState('');
+  // Private until the booker says otherwise, matching the column default.
+  const [isPrivate, setIsPrivate] = useState(true);
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<CreateBookingResponse | null>(null);
 
@@ -78,6 +81,7 @@ export default function BookPage() {
           guest_count_kids: kids,
           has_pets: pets,
           other_requests: requests.trim() || null,
+          is_private: isPrivate,
         },
       });
       setDone(res);
@@ -249,6 +253,10 @@ export default function BookPage() {
               placeholder="Optional"
             />
           </Field>
+
+          {/* Last thing before the submit button on purpose: whatever else a
+              booker skims past, they pass through this on the way out. */}
+          <ReservationVisibility value={isPrivate} onChange={setIsPrivate} />
 
           <div className="flex items-center gap-2 text-xs text-muted">
             <Info size={14} />
