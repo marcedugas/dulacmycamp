@@ -273,33 +273,110 @@ pub fn booking_confirmed_to_guest(
 /// Sent when an admin corrects the guest counts on a booking the guest
 /// already submitted. Shows the new figures, since the whole point is that
 /// what they submitted is not what now stands.
-pub fn booking_guests_updated_to_guest(b: &Booking, app_url: &str) -> Email {
-    let subject = "Your booking's guest count was updated — Dulac My Camp".to_string();
-    // Shared with the in-app notification so the two can never word it differently.
-    let counts = crate::bookings::guest_count_phrase(b.guest_count_adults, b.guest_count_kids);
+/// One plain sentence for everything an edit moved, shared by the email and
+/// the in-app notification so the two can never word it differently.
+///
+/// Reads as "The camp moved your stay to Jan 5 – Jan 8, 2027 and updated the
+/// party to 3 adults and 1 kid." — one sentence however many fields changed,
+/// because it was one action.
+pub fn booking_edit_summary(b: &Booking, edit: &crate::bookings::BookingEdit) -> String {
+    let mut parts = Vec::new();
+    if edit.dates_from.is_some() {
+        parts.push(format!(
+            "moved your stay to {} – {}",
+            b.check_in.format("%b %-d"),
+            b.check_out.format("%b %-d, %Y")
+        ));
+    }
+    if edit.counts_from.is_some() {
+        parts.push(format!(
+            "updated the party to {}",
+            crate::bookings::guest_count_phrase(b.guest_count_adults, b.guest_count_kids)
+        ));
+    }
+    format!("The camp {}.", parts.join(" and "))
+}
+
+/// Tells the guest what an admin changed on their booking — dates, party
+/// size, or both in one message.
+///
+/// One template rather than one per field: an edit is a single action, and
+/// two emails landing together for one save would read like something went
+/// wrong. The subject follows the same rule, naming what actually moved.
+pub fn booking_updated_to_guest(
+    b: &Booking,
+    edit: &crate::bookings::BookingEdit,
+    app_url: &str,
+) -> Email {
+    let (heading, subject) = match (edit.dates_from.is_some(), edit.counts_from.is_some()) {
+        (true, true) => (
+            "Booking updated",
+            "Your booking's dates and guest count were updated — Dulac My Camp",
+        ),
+        (true, false) => (
+            "Dates updated",
+            "Your booking's dates were updated — Dulac My Camp",
+        ),
+        _ => (
+            "Guest count updated",
+            "Your booking's guest count was updated — Dulac My Camp",
+        ),
+    };
+
+    let summary = booking_edit_summary(b, edit);
+
+    // What it used to say, so the guest can tell at a glance whether the
+    // change is the one they asked for.
+    let previously = match (edit.dates_from, edit.counts_from) {
+        (None, None) => String::new(),
+        (from_dates, from_counts) => {
+            let mut was = Vec::new();
+            if let Some((ci, co)) = from_dates {
+                was.push(format!("{} &rarr; {}", pretty(ci), pretty(co)));
+            }
+            if let Some((adults, kids)) = from_counts {
+                was.push(esc(&crate::bookings::guest_count_phrase(adults, kids)));
+            }
+            format!(
+                r#"<p style="margin:0 0 14px;color:#6b6b6b;">Previously: {}.</p>"#,
+                was.join(", ")
+            )
+        }
+    };
+
     let body = format!(
-        r#"<p style="margin:0 0 14px;">The camp updated the guest count on your stay for <strong>{} &rarr; {}</strong>.</p>
-<p style="margin:0 0 14px;">It now reads <strong>{}</strong>. Nothing else about your booking changed &mdash; same dates, same status.</p>
+        r#"<p style="margin:0 0 14px;">{}</p>
+{}<p style="margin:0 0 14px;">Your stay now reads <strong>{} &rarr; {}</strong> for <strong>{}</strong>. Nothing else changed &mdash; same status.</p>
 <p style="margin:0;">If that isn't right, just reply and we'll sort it out.</p>"#,
+        esc(&summary),
+        previously,
         pretty(b.check_in),
         pretty(b.check_out),
-        esc(&counts)
+        esc(&crate::bookings::guest_count_phrase(
+            b.guest_count_adults,
+            b.guest_count_kids
+        ))
     );
     let actions = format!(
         r#"<table role="presentation" cellpadding="0" cellspacing="0" style="margin:22px 0 4px;"><tr>{}</tr></table>"#,
         button("View my bookings", &format!("{app_url}/my-bookings"), GREEN)
     );
     let text = format!(
-        "Guest count updated\n\nThe camp updated the guest count on your stay for {} - {}. It now reads {}. Nothing else about your booking changed - same dates, same status.\n\nIf that isn't right, just reply and we'll sort it out.\n\n{app_url}/my-bookings\n",
+        "{heading}
+
+{summary}
+
+Your stay now reads {} - {} for {}. Nothing else changed - same status.
+
+If that isn't right, just reply and we'll sort it out.
+
+{app_url}/my-bookings
+",
         pretty(b.check_in),
         pretty(b.check_out),
-        counts
+        crate::bookings::guest_count_phrase(b.guest_count_adults, b.guest_count_kids)
     );
-    (
-        subject,
-        layout("Guest count updated", &body, &actions),
-        text,
-    )
+    (subject.to_string(), layout(heading, &body, &actions), text)
 }
 
 pub fn booking_denied_to_guest(b: &Booking, reason: Option<&str>, app_url: &str) -> Email {

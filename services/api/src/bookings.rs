@@ -437,6 +437,79 @@ async fn approved_adults(
     Ok(total.unwrap_or(0))
 }
 
+/// Live bookings whose nights collide with `[check_in, check_out)`.
+///
+/// Pending counts as live: two cousins asking for the same weekend is exactly
+/// the situation worth flagging. `exclude` skips the booking being edited, so
+/// moving a stay by a day doesn't report it as overlapping itself — the same
+/// reason [`approved_adults`] takes one.
+async fn overlapping_bookings(
+    db: &PgPool,
+    check_in: NaiveDate,
+    check_out: NaiveDate,
+    exclude: Option<Uuid>,
+) -> Result<i64, sqlx::Error> {
+    let (count,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM bookings
+         WHERE status IN ('approved', 'pending') AND check_in < $2 AND check_out > $1
+           AND ($3::uuid IS NULL OR id <> $3)",
+    )
+    .bind(check_in)
+    .bind(check_out)
+    .bind(exclude)
+    .fetch_one(db)
+    .await?;
+    Ok(count)
+}
+
+/// What a proposed set of dates and head count would mean for the camp:
+/// who else is already on those nights, and whether the beds add up.
+///
+/// Advisory, never a veto. Overlaps are deliberately permitted — the camp is
+/// shared and the owner arbitrates — and over-capacity is a judgement call
+/// that belongs to a person. Both come back as sentences for the submitter to
+/// read, not as errors.
+///
+/// The one implementation of that assessment, shared by
+/// [`create_booking_for`] and [`admin_update_booking`] so a guest requesting
+/// dates and an admin moving a booking onto those same dates are told the same
+/// thing in the same words. `exclude` is what makes it work for an edit: the
+/// booking being moved must not be counted among the stays it collides with,
+/// or every edit would warn about itself.
+async fn assess_stay(
+    state: &Shared,
+    check_in: NaiveDate,
+    check_out: NaiveDate,
+    adults: i32,
+    exclude: Option<Uuid>,
+) -> ApiResult<(Capacity, Vec<String>)> {
+    let overlaps = overlapping_bookings(&state.db, check_in, check_out, exclude).await?;
+    let already = approved_adults(&state.db, check_in, check_out, exclude).await?;
+
+    let capacity = Capacity {
+        approved_adults: already,
+        total_adults: already + i64::from(adults),
+        limit: state.cfg.capacity_adults,
+        over_capacity: already + i64::from(adults) > state.cfg.capacity_adults,
+    };
+
+    let mut warnings = Vec::new();
+    if overlaps > 0 {
+        warnings.push(
+            "These dates overlap with an existing booking. The owner will review both requests."
+                .to_string(),
+        );
+    }
+    if capacity.over_capacity {
+        warnings.push(format!(
+            "That would put {} adults at the camp, which sleeps {}. The owner will take a look.",
+            capacity.total_adults, capacity.limit
+        ));
+    }
+
+    Ok((capacity, warnings))
+}
+
 // ─────────────────────────── create ───────────────────────────
 
 /// The default every path that omits the field falls back to. `#[serde(default)]`
@@ -462,10 +535,15 @@ pub struct CreateBooking {
     pub is_private: bool,
 }
 
+/// What every write that lands a booking returns — a guest's own request, an
+/// admin entering one, and an admin editing one. The same shape on purpose:
+/// all three can leave the camp overlapped or over capacity, and all three owe
+/// the person who did it the same sentence about it.
 #[derive(Debug, Serialize)]
-pub struct CreateResponse {
+pub struct BookingWriteResponse {
     pub booking: BookingView,
-    /// Non-blocking advisory shown to the guest on submit.
+    /// Non-blocking advisory shown on submit. Never an error — see
+    /// [`assess_stay`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
     pub capacity: Capacity,
@@ -475,7 +553,7 @@ pub async fn create(
     State(state): State<Shared>,
     AuthUser(user): AuthUser,
     Json(body): Json<CreateBooking>,
-) -> ApiResult<Json<CreateResponse>> {
+) -> ApiResult<Json<BookingWriteResponse>> {
     Ok(Json(create_booking_for(&state, &user, body).await?))
 }
 
@@ -493,7 +571,7 @@ pub async fn create_booking_for(
     state: &Shared,
     user: &User,
     body: CreateBooking,
-) -> ApiResult<CreateResponse> {
+) -> ApiResult<BookingWriteResponse> {
     // Defence in depth, and the one check that isn't redundant on both paths.
     // A blocked guest submitting their own request never gets this far — the
     // auth extractor turns them away first. But `admin_create` resolves the
@@ -550,23 +628,16 @@ pub async fn create_booking_for(
         )));
     }
 
-    // Overlap with an existing request is allowed but surfaced.
-    let (overlaps,): (i64,) = sqlx::query_as(
-        "SELECT count(*) FROM bookings
-         WHERE status IN ('approved', 'pending') AND check_in < $2 AND check_out > $1",
+    // Advisory only — see `assess_stay`. Nothing below this point can turn an
+    // overlap or an over-capacity night into a refusal.
+    let (capacity, warnings) = assess_stay(
+        state,
+        body.check_in,
+        body.check_out,
+        body.guest_count_adults,
+        None,
     )
-    .bind(body.check_in)
-    .bind(body.check_out)
-    .fetch_one(&state.db)
     .await?;
-
-    let already = approved_adults(&state.db, body.check_in, body.check_out, None).await?;
-    let capacity = Capacity {
-        approved_adults: already,
-        total_adults: already + i64::from(body.guest_count_adults),
-        limit: state.cfg.capacity_adults,
-        over_capacity: already + i64::from(body.guest_count_adults) > state.cfg.capacity_adults,
-    };
 
     let token = new_token();
     let booking = sqlx::query_as::<_, Booking>(&format!(
@@ -593,20 +664,6 @@ pub async fn create_booking_for(
     .bind(APPROVE_TOKEN_TTL_HOURS.to_string())
     .fetch_one(&state.db)
     .await?;
-
-    let mut warnings = Vec::new();
-    if overlaps > 0 {
-        warnings.push(
-            "These dates overlap with an existing booking. The owner will review both requests."
-                .to_string(),
-        );
-    }
-    if capacity.over_capacity {
-        warnings.push(format!(
-            "That would put {} adults at the camp, which sleeps {}. The owner will take a look.",
-            capacity.total_adults, capacity.limit
-        ));
-    }
 
     // ── notifications ──
     let guest_name = user.display_name();
@@ -655,7 +712,7 @@ pub async fn create_booking_for(
         journal_status: None,
     };
 
-    Ok(CreateResponse {
+    Ok(BookingWriteResponse {
         booking: row.to_view(Some(user)),
         warning: (!warnings.is_empty()).then(|| warnings.join(" ")),
         capacity,
@@ -712,7 +769,7 @@ pub async fn admin_create(
     State(state): State<Shared>,
     AdminUser(_admin): AdminUser,
     Json(body): Json<AdminCreateBooking>,
-) -> ApiResult<Json<CreateResponse>> {
+) -> ApiResult<Json<BookingWriteResponse>> {
     let email = body.email.trim();
     if !email.contains('@') || email.len() < 5 {
         return Err(AppError::BadRequest(
@@ -726,7 +783,9 @@ pub async fn admin_create(
 }
 
 #[derive(Debug, Deserialize)]
-pub struct UpdateGuests {
+pub struct UpdateBooking {
+    pub check_in: NaiveDate,
+    pub check_out: NaiveDate,
     pub guest_count_adults: i32,
     pub guest_count_kids: i32,
 }
@@ -743,6 +802,25 @@ fn validate_guest_counts(adults: i32, kids: i32) -> ApiResult<()> {
     }
     if kids < 0 {
         return Err(AppError::BadRequest("Kids can't be negative.".into()));
+    }
+    Ok(())
+}
+
+/// The one date rule, mirroring `valid_dates` in `0001_core.sql`
+/// (`check_out > check_in`) and worded exactly as `create_booking_for` words
+/// it, so a stay cannot be edited into a shape a new booking could not have
+/// been submitted in.
+///
+/// Note what is deliberately *not* here: `create_booking_for` additionally
+/// refuses a check-in in the past, and an edit must not. Correcting the dates
+/// on a stay that has already happened is a large part of why this tool
+/// exists, and a rule meant to stop someone booking backwards would stop the
+/// record being put right.
+fn validate_stay_dates(check_in: NaiveDate, check_out: NaiveDate) -> ApiResult<()> {
+    if check_out <= check_in {
+        return Err(AppError::BadRequest(
+            "Check-out must be after check-in.".into(),
+        ));
     }
     Ok(())
 }
@@ -766,74 +844,150 @@ fn guest_counts_changed(before: (i32, i32), after: (i32, i32)) -> bool {
     before != after
 }
 
-/// `PUT /api/bookings/{id}/guests` — admin only.
+/// The same question for the dates.
+fn dates_changed(before: (NaiveDate, NaiveDate), after: (NaiveDate, NaiveDate)) -> bool {
+    before != after
+}
+
+/// What an admin's edit actually moved, so the guest is told about that and
+/// nothing else.
+///
+/// The point of carrying both halves in one value is that an edit is *one*
+/// action even when it touches two things: a booking whose dates and party
+/// both changed earns one email describing both, not one email per field.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BookingEdit {
+    /// The dates as they were, if they moved.
+    pub dates_from: Option<(NaiveDate, NaiveDate)>,
+    /// The counts as they were, if they moved.
+    pub counts_from: Option<(i32, i32)>,
+}
+
+impl BookingEdit {
+    /// Compares before and after, keeping only what actually differs.
+    fn between(
+        before: (NaiveDate, NaiveDate, i32, i32),
+        after: (NaiveDate, NaiveDate, i32, i32),
+    ) -> Self {
+        let (bi, bo, ba, bk) = before;
+        let (ai, ao, aa, ak) = after;
+        Self {
+            dates_from: dates_changed((bi, bo), (ai, ao)).then_some((bi, bo)),
+            counts_from: guest_counts_changed((ba, bk), (aa, ak)).then_some((ba, bk)),
+        }
+    }
+
+    /// Whether anything moved at all. False means say nothing to anybody.
+    pub fn is_empty(&self) -> bool {
+        self.dates_from.is_none() && self.counts_from.is_none()
+    }
+}
+
+/// `PUT /api/bookings/{id}/edit` — admin only.
 ///
 /// A data-correction tool, deliberately not gated on status the way the
-/// delete is: the reason it exists is that a guest submitted the wrong number
+/// delete is: the reason it exists is that a guest submitted something wrong
 /// and cannot fix it themselves, and that is just as true of an approved stay
-/// as a pending request. Only the counts move — dates, status, and everything
-/// else are left exactly as they were.
+/// as a pending request. Dates and party size move; status, ownership and
+/// everything else are left exactly as they were.
 ///
-/// The guest is emailed when the numbers actually change, matching how every
-/// other admin action on a booking announces itself. A no-op save says
-/// nothing.
-pub async fn admin_update_guests(
+/// **Advisory, not blocking.** Unlike `create_booking_for`, which refuses a
+/// blackout outright with a 409, this accepts dates that collide with a
+/// blackout, overlap another stay, or put the camp over capacity, and reports
+/// them. The asymmetry is deliberate and is about who is asking: a guest
+/// submitting a request is being told the camp is closed, while an admin
+/// moving an existing booking is the person who decides what the camp does.
+/// A tool for fixing reality cannot refuse to describe it.
+///
+/// The guest hears about it once, covering whatever actually changed — see
+/// [`BookingEdit`]. A save that moves nothing says nothing.
+pub async fn admin_update_booking(
     State(state): State<Shared>,
     AdminUser(admin): AdminUser,
     Path(id): Path<Uuid>,
-    Json(body): Json<UpdateGuests>,
-) -> ApiResult<Json<BookingView>> {
+    Json(body): Json<UpdateBooking>,
+) -> ApiResult<Json<BookingWriteResponse>> {
+    validate_stay_dates(body.check_in, body.check_out)?;
     validate_guest_counts(body.guest_count_adults, body.guest_count_kids)?;
 
     let row = load_row(&state.db, id)
         .await?
         .ok_or_else(|| AppError::NotFound("Booking not found.".into()))?;
 
-    let before = (row.booking.guest_count_adults, row.booking.guest_count_kids);
-    let after = (body.guest_count_adults, body.guest_count_kids);
+    let edit = BookingEdit::between(
+        (
+            row.booking.check_in,
+            row.booking.check_out,
+            row.booking.guest_count_adults,
+            row.booking.guest_count_kids,
+        ),
+        (
+            body.check_in,
+            body.check_out,
+            body.guest_count_adults,
+            body.guest_count_kids,
+        ),
+    );
 
     let booking = sqlx::query_as::<_, Booking>(&format!(
-        "UPDATE bookings SET guest_count_adults = $2, guest_count_kids = $3, updated_at = now()
+        "UPDATE bookings
+         SET check_in = $2, check_out = $3, guest_count_adults = $4, guest_count_kids = $5,
+             updated_at = now()
          WHERE id = $1 RETURNING {BOOKING_COLUMNS}"
     ))
     .bind(id)
+    .bind(body.check_in)
+    .bind(body.check_out)
     .bind(body.guest_count_adults)
     .bind(body.guest_count_kids)
     .fetch_one(&state.db)
     .await?;
 
-    if guest_counts_changed(before, after) {
+    // Excluding this booking, which has already been written: without that it
+    // would find itself on its own new dates and warn about overlapping
+    // itself.
+    let (capacity, warnings) = assess_stay(
+        &state,
+        booking.check_in,
+        booking.check_out,
+        booking.guest_count_adults,
+        Some(id),
+    )
+    .await?;
+
+    if !edit.is_empty() {
         email::spawn(
             state.clone(),
             row.guest_email.clone(),
-            email_templates::booking_guests_updated_to_guest(&booking, app_url(&state)),
+            email_templates::booking_updated_to_guest(&booking, &edit, app_url(&state)),
         );
         notifications::system_message(
             &state.db,
             booking.user_id,
-            "Guest count updated",
-            &format!(
-                "The camp updated your stay {} – {} to {}.",
-                booking.check_in.format("%b %-d"),
-                booking.check_out.format("%b %-d, %Y"),
-                guest_count_phrase(booking.guest_count_adults, booking.guest_count_kids)
-            ),
+            "Booking updated",
+            &email_templates::booking_edit_summary(&booking, &edit),
             Some(booking.id),
         )
         .await?;
 
         tracing::info!(
             booking_id = %id,
-            from = ?before,
-            to = ?after,
-            "booking guest counts corrected",
+            by = %admin.email,
+            dates_from = ?edit.dates_from,
+            counts_from = ?edit.counts_from,
+            "booking corrected",
         );
     }
 
     let updated = load_row(&state.db, id)
         .await?
         .ok_or_else(|| AppError::NotFound("Booking not found.".into()))?;
-    Ok(Json(updated.to_view(Some(&admin))))
+
+    Ok(Json(BookingWriteResponse {
+        booking: updated.to_view(Some(&admin)),
+        warning: (!warnings.is_empty()).then(|| warnings.join(" ")),
+        capacity,
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1541,6 +1695,100 @@ mod tests {
                  carry a head count either",
             );
         }
+    }
+
+    // ── what an edit reports as having changed ──
+    //
+    // `BookingEdit::between` is the whole of the no-op rule, and the reason
+    // one save can never produce two emails: it yields a single value
+    // describing everything that moved.
+
+    fn edit(before: (i32, i32, i32, i32), after: (i32, i32, i32, i32)) -> BookingEdit {
+        let d = |y: i32, m: u32| NaiveDate::from_ymd_opt(2027, m, y as u32).unwrap();
+        BookingEdit::between(
+            (d(before.0, 1), d(before.1, 1), before.2, before.3),
+            (d(after.0, 1), d(after.1, 1), after.2, after.3),
+        )
+    }
+
+    #[test]
+    fn moving_only_the_dates_reports_only_the_dates() {
+        let e = edit((5, 8, 2, 1), (12, 15, 2, 1));
+        assert!(e.dates_from.is_some());
+        assert!(e.counts_from.is_none());
+        assert!(!e.is_empty());
+    }
+
+    #[test]
+    fn moving_only_the_counts_reports_only_the_counts() {
+        let e = edit((5, 8, 2, 1), (5, 8, 4, 0));
+        assert!(e.dates_from.is_none());
+        assert!(e.counts_from.is_some());
+        assert!(!e.is_empty());
+    }
+
+    // One action, one value describing it — so one email, never two.
+    #[test]
+    fn moving_both_reports_both_in_a_single_edit() {
+        let e = edit((5, 8, 2, 1), (12, 15, 4, 0));
+        assert_eq!(
+            e.dates_from,
+            Some((
+                NaiveDate::from_ymd_opt(2027, 1, 5).unwrap(),
+                NaiveDate::from_ymd_opt(2027, 1, 8).unwrap(),
+            ))
+        );
+        assert_eq!(e.counts_from, Some((2, 1)));
+        assert!(!e.is_empty());
+    }
+
+    // The silence rule, now covering both halves: re-saving a booking exactly
+    // as it was must not tell anyone it changed.
+    #[test]
+    fn re_saving_an_unchanged_booking_notifies_nobody() {
+        let e = edit((5, 8, 2, 1), (5, 8, 2, 1));
+        assert!(e.is_empty());
+        assert_eq!(
+            e,
+            BookingEdit {
+                dates_from: None,
+                counts_from: None
+            }
+        );
+    }
+
+    // Either end of the range moving on its own still counts.
+    #[test]
+    fn shifting_just_one_end_of_the_stay_counts_as_a_date_change() {
+        assert!(edit((5, 8, 2, 1), (5, 9, 2, 1)).dates_from.is_some());
+        assert!(edit((5, 8, 2, 1), (4, 8, 2, 1)).dates_from.is_some());
+    }
+
+    // ── date validation on an edit ──
+
+    #[test]
+    fn an_edit_cannot_end_a_stay_before_or_when_it_starts() {
+        let jan = |d: u32| NaiveDate::from_ymd_opt(2027, 1, d).unwrap();
+        assert!(validate_stay_dates(jan(5), jan(8)).is_ok());
+        assert!(matches!(
+            validate_stay_dates(jan(8), jan(5)),
+            Err(AppError::BadRequest(_))
+        ));
+        // Equal is rejected too — `valid_dates` in 0001_core.sql is a strict
+        // `>`, so there is no such thing as a zero-night stay here.
+        assert!(matches!(
+            validate_stay_dates(jan(5), jan(5)),
+            Err(AppError::BadRequest(_))
+        ));
+    }
+
+    // An edit must be able to fix a stay that already happened, which is why
+    // it does not inherit `create_booking_for`'s no-check-in-in-the-past rule.
+    #[test]
+    fn an_edit_may_move_a_stay_that_is_already_in_the_past() {
+        let past_in = NaiveDate::from_ymd_opt(2020, 6, 1).unwrap();
+        let past_out = NaiveDate::from_ymd_opt(2020, 6, 4).unwrap();
+        assert!(validate_stay_dates(past_in, past_out).is_ok());
     }
 
     #[test]
