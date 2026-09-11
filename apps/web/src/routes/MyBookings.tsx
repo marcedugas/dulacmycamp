@@ -27,6 +27,7 @@ import { VISIBILITY_NOTE } from '../components/ReservationVisibility';
 import { api, ApiError } from '../lib/api';
 import { useBookings } from '../lib/queries';
 import { formatRange, nightCount, parseDay, pluralNights } from '../lib/dates';
+import { plural } from '../lib/plural';
 import type { Booking } from '../lib/types';
 
 /** "3 days until your stay!" — only for confirmed, future stays. */
@@ -160,8 +161,9 @@ function BookingCard({ booking, onCancel, cancelling }: {
       <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1.5 text-sm text-muted">
         <span className="flex items-center gap-1.5">
           <Users size={14} />
-          {booking.guest_count_adults ?? 0} adults
-          {(booking.guest_count_kids ?? 0) > 0 && `, ${booking.guest_count_kids} kids`}
+          {plural(booking.guest_count_adults ?? 0, 'adult')}
+          {(booking.guest_count_kids ?? 0) > 0 &&
+            `, ${plural(booking.guest_count_kids ?? 0, 'kid')}`}
         </span>
         {booking.has_pets && (
           <span className="flex items-center gap-1.5">
