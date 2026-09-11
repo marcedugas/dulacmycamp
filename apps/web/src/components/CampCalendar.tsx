@@ -154,17 +154,22 @@ function periodLabel(view: CalendarView, anchor: Date): string {
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 /**
- * The stays on a day whose booker chose to be seen.
+ * The stays on a day whose booker this viewer may see, approved and pending
+ * alike, in that order.
  *
- * `guest_first_name` is the entire test, and the server is what decides it —
- * it is sent only to a signed-in viewer, only for an approved stay, and only
- * when the booker set the reservation to public (`bookings::shows_booker`).
- * Nothing here re-derives that rule from `is_private` or the viewer's role:
- * the client has never been the thing that decides who may be seen, and a
- * second copy of the rule here is exactly how the two would drift apart.
+ * `guest_first_name` is the entire test, and the server is what decides it
+ * (`bookings::shows_booker`): family get it only for an approved, public
+ * stay, admins and the owner get it for every stay. Nothing here re-derives
+ * that from `is_private`, `status`, or the viewer's role — the client has
+ * never been the thing that decides who may be seen, and a second copy of
+ * the rule here is exactly how the two would drift apart.
+ *
+ * Pending stays are included for the same reason: for anyone but staff they
+ * arrive without a name and drop out on their own, so this needs no idea of
+ * who is asking.
  */
-function namedStays(bookings: Booking[]): Booking[] {
-  return bookings.filter((b) => Boolean(b.guest_first_name));
+function namedStays(cell: DayCell): Booking[] {
+  return [...cell.approved, ...cell.pending].filter((b) => Boolean(b.guest_first_name));
 }
 
 /** "Jean · 3" — party size is adults plus kids, one number, since a cell has
@@ -174,6 +179,12 @@ function namedStays(bookings: Booking[]): Booking[] {
 // UI is expected to hit.
 function partySize(b: Booking): number {
   return (b.guest_count_adults ?? 0) + (b.guest_count_kids ?? 0);
+}
+
+/** The full word, for tooltips and screen readers — the cell itself only has
+ *  room for the abbreviation. */
+function statusLabel(b: Booking): string {
+  return b.status === 'pending' ? 'Pending' : 'Confirmed';
 }
 
 function partyBreakdown(b: Booking): string {
@@ -193,16 +204,27 @@ interface DayProps {
   selected: boolean;
   isRangeEdge: boolean;
   capacityLimit: number;
+  /** Whether to label each named stay confirmed/pending — staff only. */
+  showStatus: boolean;
   onClick?: (key: string) => void;
 }
 
-function Day({ date, cell, dimmed, selected, isRangeEdge, capacityLimit, onClick }: DayProps) {
+function Day({
+  date,
+  cell,
+  dimmed,
+  selected,
+  isRangeEdge,
+  capacityLimit,
+  showStatus,
+  onClick,
+}: DayProps) {
   const key = toKey(date);
   const today = isSameDay(date, new Date());
   const over = cell.adults > capacityLimit;
   const doubleBooked = cell.approved.length + cell.pending.length > 1;
   const clickable = Boolean(onClick);
-  const named = namedStays(cell.approved);
+  const named = namedStays(cell);
 
   return (
     <button
@@ -211,7 +233,14 @@ function Day({ date, cell, dimmed, selected, isRangeEdge, capacityLimit, onClick
       onClick={() => onClick?.(key)}
       aria-label={`${format(date, 'EEEE, MMMM d, yyyy')}${
         cell.blackout ? ', unavailable' : cell.approved.length ? ', booked' : ', available'
-      }${named.map((b) => `, ${b.guest_first_name}, party of ${partySize(b)}`).join('')}${
+      }${named
+        .map(
+          (b) =>
+            `, ${b.guest_first_name}, party of ${partySize(b)}${
+              showStatus ? `, ${statusLabel(b)}` : ''
+            }`,
+        )
+        .join('')}${
         cell.holiday ? `, ${cell.holiday.name}` : ''
       }`}
       aria-pressed={selected}
@@ -286,17 +315,44 @@ function Day({ date, cell, dimmed, selected, isRangeEdge, capacityLimit, onClick
         </span>
       )}
 
-      {/* Who's coming, for the stays whose booker opted into being seen. It
-          sits under the Booked badge rather than replacing it: the badge is
-          the availability answer and stays identical either way, and this is
-          only ever an addition to it. */}
+      {/* Who's coming, for the stays this viewer may see a booker on. It sits
+          under the Booked/Pending badges rather than replacing them: those
+          are the availability answer and stay identical for everyone, and
+          this is only ever an addition to them.
+
+          The status chip is staff-only. For family it would be noise at best
+          — they are only ever shown approved stays here, so it could only
+          ever read "Confirmed" — and the day's own badges already say how
+          the camp stands. For staff, who now see pending bookers too, it is
+          the thing that tells the two apart. */}
       {named.map((b) => (
         <span
           key={b.id}
-          title={partyBreakdown(b)}
-          className="truncate text-[10px] font-semibold text-forest-700"
+          title={`${partyBreakdown(b)}${showStatus ? ` — ${statusLabel(b)}` : ''}`}
+          className={cx(
+            'flex items-center gap-1 truncate text-[10px] font-semibold',
+            showStatus && b.status === 'pending' ? 'text-amber-800' : 'text-forest-700',
+          )}
         >
-          {b.guest_first_name} · {partySize(b)}
+          {showStatus && (
+            <span
+              className={cx(
+                // Truncates before the name does: at a 7-column grid on a
+                // phone there is room for one of the two, and which stay it
+                // is beats what state it is in — the day's own badge above
+                // already answers the latter.
+                'min-w-0 truncate rounded px-1 text-[9px] font-bold leading-[1.5]',
+                b.status === 'pending'
+                  ? 'border border-amber-300 bg-amber-100 text-amber-900'
+                  : 'bg-forest-600 text-cream',
+              )}
+            >
+              {statusLabel(b)}
+            </span>
+          )}
+          <span className="shrink-0 truncate">
+            {b.guest_first_name} · {partySize(b)}
+          </span>
         </span>
       ))}
     </button>
@@ -308,10 +364,12 @@ function Day({ date, cell, dimmed, selected, isRangeEdge, capacityLimit, onClick
 function YearGrid({
   year,
   index,
+  showStatus,
   onPickMonth,
 }: {
   year: number;
   index: Map<string, DayCell>;
+  showStatus: boolean;
   onPickMonth: (d: Date) => void;
 }) {
   return (
@@ -351,7 +409,9 @@ function YearGrid({
                     title={[
                       format(d, 'MMM d, yyyy'),
                       cell.holiday?.name,
-                      ...namedStays(cell.approved).map(partyBreakdown),
+                      ...namedStays(cell).map((b) =>
+                        showStatus ? `${partyBreakdown(b)} (${statusLabel(b)})` : partyBreakdown(b),
+                      ),
                     ]
                       .filter(Boolean)
                       .join(' — ')}
@@ -421,6 +481,13 @@ interface Props {
   events: SpecialEvent[];
   /** Per-night approved adult totals — see [[useOccupancy]]. */
   occupancy?: DayOccupancy[];
+  /**
+   * Whether to label each named stay confirmed/pending. Staff only — mirrors
+   * the server's `User::sees_guest_details`, and is the viewer-level half of
+   * a rule whose data half the server already enforces: for anyone else the
+   * stays this could label never arrive with a name in the first place.
+   */
+  showStatus?: boolean;
   /** Reference-only US holiday markers — see [[useHolidays]]. */
   holidays?: Holiday[];
   capacityLimit: number;
@@ -438,6 +505,7 @@ export default function CampCalendar({
   blackouts,
   events,
   occupancy = [],
+  showStatus = false,
   holidays = [],
   capacityLimit,
   view,
@@ -510,6 +578,7 @@ export default function CampCalendar({
         <YearGrid
           year={anchor.getFullYear()}
           index={index}
+          showStatus={showStatus}
           onPickMonth={(d) => {
             onAnchorChange(d);
             onViewChange('month');
@@ -536,6 +605,7 @@ export default function CampCalendar({
                   selected={inSelection(key)}
                   isRangeEdge={key === selection?.start || key === selection?.end}
                   capacityLimit={capacityLimit}
+                  showStatus={showStatus}
                   onClick={onDayClick}
                 />
               );

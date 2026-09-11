@@ -155,23 +155,38 @@ pub struct BookingView {
 
 /// Whether the calendar may name the person on this stay.
 ///
-/// All three conditions have to hold, and each rules out a different way the
-/// feature could leak someone:
+/// Two audiences, and the difference between them is the whole rule.
 ///
-///   * `viewer_signed_in` — the public calendar never names anyone. Opting
-///     in makes a booker visible to *registered family*, not to the internet,
-///     so an anonymous visitor sees the same anonymous "Booked" cell they
-///     always have regardless of what the booker chose.
+/// **The people who run the camp** (`sees_guest_details` — admins and anyone
+/// flagged `is_owner`) always see who booked, on every stay, whatever its
+/// status and whatever the booker chose. The privacy toggle was never aimed
+/// at them: it exists so family browsing the calendar cannot see each other,
+/// while the owner deciding whether to approve a request obviously has to
+/// know whose request it is — they are already reading that name in the
+/// approval email, in the admin table, and in `guest_name` on this very
+/// response. Withholding it on the calendar alone protected nobody and just
+/// made the one view they actually work from the least informative.
+///
+/// **Everyone else** is unchanged, and all three conditions still have to
+/// hold, each ruling out a different way the feature could leak someone:
+///
+///   * `signed_in` — the public calendar never names anyone. Opting in makes
+///     a booker visible to *registered family*, not to the internet, so an
+///     anonymous visitor sees the same anonymous "Booked" cell they always
+///     have regardless of what the booker chose.
 ///   * `!is_private` — the booker's own choice, and the one that defaults to
 ///     withholding.
 ///   * approved — a request nobody has said yes to yet is not news about who
 ///     is coming to the camp. Pending stays still block their nights on the
 ///     calendar; they just do it anonymously until they are real.
 ///
+/// `sees_guest_details` implies `signed_in` (it is read off a `User`), so the
+/// staff arm does not repeat that check.
+///
 /// Pure so the rule is testable as a rule, rather than only reachable through
 /// a database and an HTTP request.
-fn shows_booker(viewer_signed_in: bool, is_private: bool, status: &str) -> bool {
-    viewer_signed_in && !is_private && status == "approved"
+fn shows_booker(signed_in: bool, sees_guest_details: bool, is_private: bool, status: &str) -> bool {
+    sees_guest_details || (signed_in && !is_private && status == "approved")
 }
 
 impl BookingRow {
@@ -179,11 +194,12 @@ impl BookingRow {
     fn to_view(&self, viewer: Option<&User>) -> BookingView {
         let b = &self.booking;
         let is_mine = viewer.is_some_and(|v| v.id == b.user_id);
-        let full = is_mine || viewer.is_some_and(User::sees_guest_details);
+        let staff = viewer.is_some_and(User::sees_guest_details);
+        let full = is_mine || staff;
         // The party travels with the name: whoever may know who is coming may
         // know how many, and nobody else. `full` covers the booking's own
         // guest and the admins who arbitrate it.
-        let named = shows_booker(viewer.is_some(), b.is_private, &b.status);
+        let named = shows_booker(viewer.is_some(), staff, b.is_private, &b.status);
         let party = full || named;
 
         BookingView {
@@ -276,14 +292,22 @@ pub async fn list(
     MaybeUser(viewer): MaybeUser,
     Query(q): Query<ListQuery>,
 ) -> ApiResult<Json<Vec<BookingView>>> {
-    let is_admin = viewer.as_ref().is_some_and(User::is_admin);
+    // `sees_guest_details`, not `is_admin`: the camp owner is the person who
+    // approves stays, so a calendar that hides pending requests from them
+    // hides exactly the rows they are meant to act on. An owner already
+    // receives every one of those requests by email, in full — this only
+    // catches the app up to what their inbox has always shown them. The flag
+    // is the one that matters and an owner need not hold the admin role, so
+    // the same helper that decides whether they may see a booker decides
+    // whether they are sent the booking at all.
+    let staff = viewer.as_ref().is_some_and(User::sees_guest_details);
     let viewer_id = viewer.as_ref().map(|v| v.id);
 
     // Visibility, expressed once in SQL rather than filtered in Rust:
-    //  - admins see everything
+    //  - admins and the owner see everything
     //  - a guest sees every approved stay plus all of their own rows
     //  - anonymous callers see approved stays only
-    let visibility = if is_admin {
+    let visibility = if staff {
         "true"
     } else if viewer_id.is_some() {
         "(b.status = 'approved' OR b.user_id = $1)"
@@ -1412,18 +1436,23 @@ mod tests {
 
     // ── who the calendar may name ──
     //
-    // `shows_booker` is the whole of Step D's rule. Each test below pins one
-    // of the three ways it can say no.
+    // `shows_booker` is the whole rule. The family arm is spelled out first
+    // — each test pinning one of the three ways it can say no — and the
+    // staff arm after it, since the two audiences are the point.
+    //
+    // Every family-arm case below passes `sees_guest_details: false`, which
+    // is what makes them a regression net: if the staff bypass ever leaked
+    // into the ordinary path, these would start returning true.
 
     #[test]
     fn an_approved_public_booking_is_named_to_a_signed_in_viewer() {
-        assert!(shows_booker(true, false, "approved"));
+        assert!(shows_booker(true, false, false, "approved"));
     }
 
     #[test]
-    fn a_private_booking_is_never_named() {
-        assert!(!shows_booker(true, true, "approved"));
-        assert!(!shows_booker(false, true, "approved"));
+    fn a_private_booking_is_never_named_to_ordinary_family() {
+        assert!(!shows_booker(true, false, true, "approved"));
+        assert!(!shows_booker(false, false, true, "approved"));
     }
 
     // The public calendar is not what anyone opted in to. Choosing to be
@@ -1431,15 +1460,42 @@ mod tests {
     // stranger who never signed in.
     #[test]
     fn an_anonymous_visitor_is_never_shown_a_name_however_public_the_booking() {
-        assert!(!shows_booker(false, false, "approved"));
+        assert!(!shows_booker(false, false, false, "approved"));
     }
 
     // A request the owner has not said yes to yet is not news about who is
     // coming; it still blocks its nights, just anonymously.
     #[test]
-    fn a_booking_that_is_not_yet_approved_is_not_named_even_when_public() {
+    fn a_booking_that_is_not_yet_approved_is_not_named_to_ordinary_family() {
         for status in ["pending", "denied", "cancelled"] {
-            assert!(!shows_booker(true, false, status));
+            assert!(!shows_booker(true, false, false, status));
+        }
+    }
+
+    // ── the staff arm ──
+
+    // Admins and the owner run the camp: no status gate, no privacy gate.
+    // They are already reading this name in the approval email and the admin
+    // table, so withholding it on the calendar protected nobody.
+    #[test]
+    fn staff_are_named_every_booking_whatever_its_status_or_privacy() {
+        for status in ["approved", "pending", "denied", "cancelled"] {
+            for is_private in [true, false] {
+                assert!(
+                    shows_booker(true, true, is_private, status),
+                    "staff must see {status} / private={is_private}",
+                );
+            }
+        }
+    }
+
+    // The bypass is a property of the viewer, not of the booking: the very
+    // same rows that open up for staff stay shut for a family member.
+    #[test]
+    fn the_staff_bypass_does_not_widen_what_family_can_see() {
+        for status in ["approved", "pending"] {
+            assert!(shows_booker(true, true, true, status));
+            assert!(!shows_booker(true, false, true, status));
         }
     }
 
@@ -1455,7 +1511,7 @@ mod tests {
         )
         .expect("a form that predates the toggle still deserialises");
         assert!(submitted.is_private);
-        assert!(!shows_booker(true, submitted.is_private, "approved"));
+        assert!(!shows_booker(true, false, submitted.is_private, "approved"));
     }
 
     #[test]
@@ -1480,7 +1536,7 @@ mod tests {
             (true, false, "pending"),   // public, but not approved yet
         ] {
             assert!(
-                !shows_booker(signed_in, is_private, status),
+                !shows_booker(signed_in, false, is_private, status),
                 "{signed_in}/{is_private}/{status} must not be named, and so must not \
                  carry a head count either",
             );
