@@ -12,7 +12,7 @@ import { formatRange, parseDay, toKey } from '../lib/dates';
 
 export default function CalendarPage() {
   const navigate = useNavigate();
-  const { bookings, blackouts, events, capacityLimit, isLoading } = useCalendarData();
+  const { bookings, blackouts, events, occupancy, capacityLimit, isLoading } = useCalendarData();
 
   const [view, setView] = useState<CalendarView>('month');
   const [anchor, setAnchor] = useState(new Date());
@@ -31,8 +31,8 @@ export default function CalendarPage() {
   const { data: holidays } = useHolidays(holidayYears);
 
   const index = useMemo(
-    () => buildIndex(bookings, blackouts, events),
-    [bookings, blackouts, events],
+    () => buildIndex(bookings, blackouts, events, occupancy),
+    [bookings, blackouts, events, occupancy],
   );
 
   /**
@@ -88,6 +88,7 @@ export default function CalendarPage() {
               bookings={bookings}
               blackouts={blackouts}
               events={events}
+              occupancy={occupancy}
               holidays={holidays}
               capacityLimit={capacityLimit}
               view={view}

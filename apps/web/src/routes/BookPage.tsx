@@ -15,7 +15,7 @@ import type { CreateBookingResponse } from '../lib/types';
 export default function BookPage() {
   const [params] = useSearchParams();
   const queryClient = useQueryClient();
-  const { bookings, blackouts, events, capacityLimit } = useCalendarData();
+  const { bookings, blackouts, events, occupancy, capacityLimit } = useCalendarData();
 
   const today = toKey(new Date());
   const [checkIn, setCheckIn] = useState(params.get('from') ?? today);
@@ -30,8 +30,8 @@ export default function BookPage() {
   const [done, setDone] = useState<CreateBookingResponse | null>(null);
 
   const index = useMemo(
-    () => buildIndex(bookings, blackouts, events),
-    [bookings, blackouts, events],
+    () => buildIndex(bookings, blackouts, events, occupancy),
+    [bookings, blackouts, events, occupancy],
   );
 
   const valid = Boolean(checkIn && checkOut && checkOut > checkIn);

@@ -214,6 +214,10 @@ pub fn router(state: Shared) -> Router {
             get(bookings::deny_by_token).post(bookings::deny_by_token_submit),
         )
         .route("/bookings", get(bookings::list).post(bookings::create))
+        // Per-night head counts for the capacity warning. Public aggregate —
+        // the per-booking breakdown on `BookingView` is not. See
+        // `bookings::occupancy`.
+        .route("/bookings/occupancy", get(bookings::occupancy))
         .route("/bookings/{id}/cancel", put(bookings::cancel))
         // Cancel is the reversible tool and the one to reach for; the delete
         // is for rows that should never have been there at all.

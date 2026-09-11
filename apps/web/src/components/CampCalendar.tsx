@@ -12,7 +12,7 @@ import {
   startOfWeek,
 } from 'date-fns';
 import { ChevronLeft, ChevronRight, Flag, TriangleAlert } from 'lucide-react';
-import type { BlackoutDate, Booking, Holiday, SpecialEvent } from '../lib/types';
+import type { BlackoutDate, Booking, DayOccupancy, Holiday, SpecialEvent } from '../lib/types';
 import { daysInclusive, nightsOf, parseDay, toKey } from '../lib/dates';
 import { Button, cx } from './ui';
 
@@ -31,7 +31,12 @@ export interface DayCell {
   pending: Booking[];
   blackout: BlackoutDate | null;
   events: SpecialEvent[];
-  /** Adults on approved stays that night. */
+  /**
+   * Adults on approved stays that night, from the server's aggregate rather
+   * than summed from the bookings above — those no longer carry a head count
+   * unless the viewer may see whose stay it is, and the capacity warning has
+   * to work for everyone, including logged-out visitors.
+   */
   adults: number;
   /**
    * Reference-only US holiday marker, if any. Unlike every other field on
@@ -60,6 +65,7 @@ export function buildIndex(
   bookings: Booking[],
   blackouts: BlackoutDate[],
   events: SpecialEvent[],
+  occupancy: DayOccupancy[] = [],
   holidays: Holiday[] = [],
 ): Map<string, DayCell> {
   const map = new Map<string, DayCell>();
@@ -78,11 +84,14 @@ export function buildIndex(
       const cell = at(toKey(night));
       if (b.status === 'approved') {
         cell.approved.push(b);
-        cell.adults += b.guest_count_adults;
       } else {
         cell.pending.push(b);
       }
     }
+  }
+
+  for (const o of occupancy) {
+    at(o.date).adults = o.adults;
   }
 
   for (const bo of blackouts) {
@@ -160,15 +169,19 @@ function namedStays(bookings: Booking[]): Booking[] {
 
 /** "Jean · 3" — party size is adults plus kids, one number, since a cell has
  *  room for a number and not a sentence. The breakdown is in the tooltip. */
+// The counts arrive with `guest_first_name` or not at all, so these only ever
+// run on a booking that has them; the fallbacks are a floor, not a case the
+// UI is expected to hit.
 function partySize(b: Booking): number {
-  return b.guest_count_adults + b.guest_count_kids;
+  return (b.guest_count_adults ?? 0) + (b.guest_count_kids ?? 0);
 }
 
 function partyBreakdown(b: Booking): string {
-  const kids = b.guest_count_kids;
-  return `${b.guest_first_name} — ${b.guest_count_adults} adult${
-    b.guest_count_adults === 1 ? '' : 's'
-  }${kids > 0 ? `, ${kids} kid${kids === 1 ? '' : 's'}` : ''}`;
+  const adults = b.guest_count_adults ?? 0;
+  const kids = b.guest_count_kids ?? 0;
+  return `${b.guest_first_name} — ${adults} adult${adults === 1 ? '' : 's'}${
+    kids > 0 ? `, ${kids} kid${kids === 1 ? '' : 's'}` : ''
+  }`;
 }
 
 // ─────────────────────────── day cell ───────────────────────────
@@ -406,6 +419,8 @@ interface Props {
   bookings: Booking[];
   blackouts: BlackoutDate[];
   events: SpecialEvent[];
+  /** Per-night approved adult totals — see [[useOccupancy]]. */
+  occupancy?: DayOccupancy[];
   /** Reference-only US holiday markers — see [[useHolidays]]. */
   holidays?: Holiday[];
   capacityLimit: number;
@@ -422,6 +437,7 @@ export default function CampCalendar({
   bookings,
   blackouts,
   events,
+  occupancy = [],
   holidays = [],
   capacityLimit,
   view,
@@ -432,8 +448,8 @@ export default function CampCalendar({
   onDayClick,
 }: Props) {
   const index = useMemo(
-    () => buildIndex(bookings, blackouts, events, holidays),
-    [bookings, blackouts, events, holidays],
+    () => buildIndex(bookings, blackouts, events, occupancy, holidays),
+    [bookings, blackouts, events, occupancy, holidays],
   );
   const days = useMemo(() => visibleDays(view, anchor), [view, anchor]);
 

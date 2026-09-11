@@ -90,8 +90,14 @@ export interface Booking {
   check_in: string;
   check_out: string;
   status: BookingStatus;
-  guest_count_adults: number;
-  guest_count_kids: number;
+  /** The party, present only for callers allowed to know whose stay this is:
+   *  the booking's owner, admins, and — for an approved, public booking seen
+   *  by a signed-in viewer — everyone `guest_first_name` is sent to. A head
+   *  count for a named household is as identifying as the name, so the server
+   *  withholds it rather than leaving it to the client not to render it.
+   *  The capacity warning uses `DayOccupancy` instead. */
+  guest_count_adults?: number;
+  guest_count_kids?: number;
   is_mine: boolean;
   user_id?: string;
   guest_name?: string;
@@ -117,6 +123,13 @@ export interface Booking {
    *  stay rendered before this field existed. Never sent to anonymous
    *  visitors, whatever the booker chose. */
   guest_first_name?: string;
+}
+
+/** One night's approved adult total — a fact about the camp, not about any
+ *  one party, and the only head count anonymous callers receive. */
+export interface DayOccupancy {
+  date: string;
+  adults: number;
 }
 
 export interface Capacity {

@@ -160,8 +160,8 @@ function BookingCard({ booking, onCancel, cancelling }: {
       <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1.5 text-sm text-muted">
         <span className="flex items-center gap-1.5">
           <Users size={14} />
-          {booking.guest_count_adults} adults
-          {booking.guest_count_kids > 0 && `, ${booking.guest_count_kids} kids`}
+          {booking.guest_count_adults ?? 0} adults
+          {(booking.guest_count_kids ?? 0) > 0 && `, ${booking.guest_count_kids} kids`}
         </span>
         {booking.has_pets && (
           <span className="flex items-center gap-1.5">

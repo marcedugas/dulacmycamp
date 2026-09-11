@@ -92,8 +92,22 @@ pub struct BookingView {
     pub check_in: NaiveDate,
     pub check_out: NaiveDate,
     pub status: String,
-    pub guest_count_adults: i32,
-    pub guest_count_kids: i32,
+    /// The party, withheld from anyone [`shows_booker`] would not name.
+    ///
+    /// "2 adults and a kid" is not meaningfully less identifying than the
+    /// name it sits next to — it says how many people, and which of them are
+    /// children, for a specific household on specific dates. Withholding the
+    /// name while shipping the breakdown to every caller would have made the
+    /// privacy setting a UI preference rather than a rule, since the numbers
+    /// are a devtools Network tab away.
+    ///
+    /// The calendar's capacity warning does not read these. It reads
+    /// [`occupancy`], a per-night total that is nobody's household in
+    /// particular.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guest_count_adults: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guest_count_kids: Option<i32>,
     pub is_mine: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_id: Option<Uuid>,
@@ -166,14 +180,19 @@ impl BookingRow {
         let b = &self.booking;
         let is_mine = viewer.is_some_and(|v| v.id == b.user_id);
         let full = is_mine || viewer.is_some_and(User::sees_guest_details);
+        // The party travels with the name: whoever may know who is coming may
+        // know how many, and nobody else. `full` covers the booking's own
+        // guest and the admins who arbitrate it.
+        let named = shows_booker(viewer.is_some(), b.is_private, &b.status);
+        let party = full || named;
 
         BookingView {
             id: b.id,
             check_in: b.check_in,
             check_out: b.check_out,
             status: b.status.clone(),
-            guest_count_adults: b.guest_count_adults,
-            guest_count_kids: b.guest_count_kids,
+            guest_count_adults: party.then_some(b.guest_count_adults),
+            guest_count_kids: party.then_some(b.guest_count_kids),
             is_mine,
             user_id: full.then_some(b.user_id),
             guest_name: full.then(|| {
@@ -198,8 +217,7 @@ impl BookingRow {
             // cousin should read as the same "Jean" on the calendar as on
             // their story. It also never falls back to the email the way the
             // admin-facing `guest_name` above does.
-            guest_first_name: shows_booker(viewer.is_some(), b.is_private, &b.status)
-                .then(|| users::first_name(self.guest_name.as_deref())),
+            guest_first_name: named.then(|| users::first_name(self.guest_name.as_deref())),
         }
     }
 }
@@ -316,6 +334,50 @@ pub async fn get_one(
         return Err(AppError::Forbidden("That isn't your booking.".into()));
     }
     Ok(Json(row.to_view(Some(&viewer))))
+}
+
+// ─────────────────────────── occupancy ───────────────────────────
+
+/// One night, and how many adults are approved to be at the camp for it.
+#[derive(Debug, Serialize, FromRow)]
+pub struct DayOccupancy {
+    pub date: NaiveDate,
+    pub adults: i64,
+}
+
+/// `GET /api/bookings/occupancy` — public, and deliberately so.
+///
+/// This is what the calendar's over-capacity warning and the booking form's
+/// "camp sleeps N" figure are built from, and it exists because those two
+/// features are the reason per-booking head counts used to be readable by
+/// everyone. A night's total is a fact about the *camp* — it answers "is
+/// there room on the 5th", which is the question a public availability
+/// calendar is for. `BookingView`'s counts are a fact about a household, and
+/// are gated accordingly.
+///
+/// The aggregate is not a perfect anonymiser and is not meant to be: on a
+/// night with exactly one approved stay, the total is that stay's adult
+/// count. That much has been public since the capacity warning shipped, it
+/// is inherent to answering the availability question at all, and it still
+/// never attaches a number to a name, never reveals how many of a party are
+/// children, and never says anything about a stay nobody has approved.
+pub async fn occupancy(State(state): State<Shared>) -> ApiResult<Json<Vec<DayOccupancy>>> {
+    // One row per occupied night: a stay holds check-in through the night
+    // before check-out, which is the same span `nightsOf` walks on the client
+    // and the reason the departure day reads as free for the next guest.
+    let rows = sqlx::query_as::<_, DayOccupancy>(
+        "SELECT night::date AS date, sum(b.guest_count_adults)::bigint AS adults
+         FROM bookings b
+         CROSS JOIN LATERAL
+             generate_series(b.check_in, b.check_out - 1, interval '1 day') AS night
+         WHERE b.status = 'approved'
+         GROUP BY night
+         ORDER BY night",
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(rows))
 }
 
 // ─────────────────────────── capacity ───────────────────────────
@@ -1404,6 +1466,25 @@ mod tests {
         .expect("the admin form's older shape still deserialises");
         assert!(entered.is_private);
         assert!(CreateBooking::from(entered).is_private);
+    }
+
+    // The party breakdown travels with the name, and is withheld from
+    // everyone else — the gap this closes was that it used to ship to every
+    // caller regardless. `party` in `to_view` is `full || shows_booker`, so
+    // the cases below are exactly the ones where `shows_booker` decides.
+    #[test]
+    fn the_party_breakdown_is_withheld_from_whoever_may_not_be_told_the_name() {
+        for (signed_in, is_private, status) in [
+            (true, true, "approved"),   // private: a signed-in cousin
+            (false, false, "approved"), // public, but an anonymous visitor
+            (true, false, "pending"),   // public, but not approved yet
+        ] {
+            assert!(
+                !shows_booker(signed_in, is_private, status),
+                "{signed_in}/{is_private}/{status} must not be named, and so must not \
+                 carry a head count either",
+            );
+        }
     }
 
     #[test]

@@ -273,9 +273,12 @@ function EditGuestsModal({
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const [adults, setAdults] = useState(booking.guest_count_adults);
-  const [kids, setKids] = useState(booking.guest_count_kids);
-  const unchanged = adults === booking.guest_count_adults && kids === booking.guest_count_kids;
+  // An admin always receives the real counts, so these fallbacks are a floor
+  // for the type rather than a state the panel reaches.
+  const [adults, setAdults] = useState(booking.guest_count_adults ?? 1);
+  const [kids, setKids] = useState(booking.guest_count_kids ?? 0);
+  const unchanged =
+    adults === (booking.guest_count_adults ?? 1) && kids === (booking.guest_count_kids ?? 0);
 
   const save = useMutation({
     mutationFn: () =>
@@ -496,8 +499,8 @@ export default function BookingsTab() {
                       </span>
                     </td>
                     <td className="px-3 py-2.5 text-charcoal">
-                      {b.guest_count_adults}a
-                      {b.guest_count_kids > 0 && ` · ${b.guest_count_kids}k`}
+                      {b.guest_count_adults ?? 0}a
+                      {(b.guest_count_kids ?? 0) > 0 && ` · ${b.guest_count_kids}k`}
                       {b.has_pets && <Dog size={13} className="ml-1 inline text-wood-600" />}
                     </td>
                     <td className="px-3 py-2.5">
@@ -628,7 +631,7 @@ export default function BookingsTab() {
               {pluralNights(nightCount(details.check_in, details.check_out))}
             </p>
             <p>
-              {details.guest_count_adults} adults, {details.guest_count_kids} kids ·{' '}
+              {details.guest_count_adults ?? 0} adults, {details.guest_count_kids ?? 0} kids ·{' '}
               {details.has_pets ? 'pets' : 'no pets'}
             </p>
             {details.other_requests && (
