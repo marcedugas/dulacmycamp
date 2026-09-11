@@ -2,7 +2,17 @@ import { Link } from 'react-router-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { differenceInCalendarDays } from 'date-fns';
 import { toast } from 'sonner';
-import { BookOpen, CalendarPlus, CheckCircle2, ClipboardCheck, Dog, Tent, Users } from 'lucide-react';
+import {
+  BookOpen,
+  CalendarPlus,
+  CheckCircle2,
+  ClipboardCheck,
+  Dog,
+  Eye,
+  EyeOff,
+  Tent,
+  Users,
+} from 'lucide-react';
 import {
   Button,
   Card,
@@ -11,10 +21,13 @@ import {
   PageHeader,
   Spinner,
   StatusBadge,
+  cx,
 } from '../components/ui';
+import { VISIBILITY_NOTE } from '../components/ReservationVisibility';
 import { api, ApiError } from '../lib/api';
 import { useBookings } from '../lib/queries';
 import { formatRange, nightCount, parseDay, pluralNights } from '../lib/dates';
+import { plural } from '../lib/plural';
 import type { Booking } from '../lib/types';
 
 /** "3 days until your stay!" — only for confirmed, future stays. */
@@ -45,6 +58,73 @@ function isCheckoutEligible(b: Booking): boolean {
  */
 function isJournalEligible(b: Booking): boolean {
   return b.status === 'approved' && !b.journal_id && b.check_in <= todayUtc();
+}
+
+/**
+ * Changing your mind after the fact, on any booking of yours.
+ *
+ * Deliberately not gated on status, the way Cancel and Checkout above are:
+ * those are steps in the stay's life and only make sense at one point in it,
+ * while this is a standing preference about *you*. Somebody who decides they
+ * would rather not be listed shouldn't be told their booking is in the wrong
+ * state to say so.
+ *
+ * Nothing is emailed — this is a self-service preference, not something that
+ * happened to the guest, so there is nobody to alert. The API side says the
+ * same (`bookings::update_privacy`).
+ */
+function VisibilityToggle({ booking }: { booking: Booking }) {
+  const queryClient = useQueryClient();
+  // Absent would mean the server withheld it, which can't happen on a booking
+  // of your own; private is still the right assumption if it somehow does.
+  const isPrivate = booking.is_private ?? true;
+
+  const save = useMutation({
+    mutationFn: (next: boolean) =>
+      api(`/bookings/${booking.id}/privacy`, { method: 'PUT', body: { is_private: next } }),
+    onSuccess: (_res, next) => {
+      toast.success(
+        next
+          ? 'This stay is private — other family just see the dates as unavailable.'
+          : 'This stay is public — other family can see your name and party size.',
+      );
+      void queryClient.invalidateQueries({ queryKey: ['bookings'] });
+    },
+    onError: (err) =>
+      toast.error(err instanceof ApiError ? err.message : 'Could not change that setting.'),
+  });
+
+  return (
+    <div className="mt-4 rounded-lg border border-sand bg-cream-dark/50 px-3 py-2.5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="text-sm font-semibold text-charcoal">Reservation visibility</span>
+        <div className="flex rounded-lg border border-sand bg-white p-0.5">
+          {[
+            { value: true, label: 'Private', icon: EyeOff },
+            { value: false, label: 'Public', icon: Eye },
+          ].map(({ value, label, icon: Icon }) => (
+            <button
+              key={label}
+              type="button"
+              aria-pressed={isPrivate === value}
+              disabled={save.isPending || isPrivate === value}
+              onClick={() => save.mutate(value)}
+              className={cx(
+                'flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition',
+                isPrivate === value
+                  ? 'bg-forest-600 text-cream'
+                  : 'text-muted hover:text-charcoal disabled:opacity-50',
+              )}
+            >
+              <Icon size={13} /> {label}
+            </button>
+          ))}
+        </div>
+      </div>
+      {/* The same words the booking form used — see VISIBILITY_NOTE. */}
+      <p className="mt-1.5 text-xs leading-relaxed text-muted">{VISIBILITY_NOTE}</p>
+    </div>
+  );
 }
 
 function BookingCard({ booking, onCancel, cancelling }: {
@@ -81,8 +161,9 @@ function BookingCard({ booking, onCancel, cancelling }: {
       <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1.5 text-sm text-muted">
         <span className="flex items-center gap-1.5">
           <Users size={14} />
-          {booking.guest_count_adults} adults
-          {booking.guest_count_kids > 0 && `, ${booking.guest_count_kids} kids`}
+          {plural(booking.guest_count_adults ?? 0, 'adult')}
+          {(booking.guest_count_kids ?? 0) > 0 &&
+            `, ${plural(booking.guest_count_kids ?? 0, 'kid')}`}
         </span>
         {booking.has_pets && (
           <span className="flex items-center gap-1.5">
@@ -108,6 +189,8 @@ function BookingCard({ booking, onCancel, cancelling }: {
           🎣 {soon}
         </p>
       )}
+
+      <VisibilityToggle booking={booking} />
 
       {(checkoutEligible || isJournalEligible(booking) || booking.journal_status === 'pending' || canCancel) && (
         <div className="mt-4 flex flex-wrap justify-end gap-2">

@@ -11,6 +11,7 @@ import type {
   ChecklistItem,
   CheckoutEligibleBooking,
   ContentAccessSection,
+  DayOccupancy,
   GalleryPhoto,
   GuestPhotosLink,
   Holiday,
@@ -56,6 +57,19 @@ export function useBookings(params?: { mine?: boolean; status?: string }) {
   return useQuery({
     queryKey: ['bookings', params?.mine ?? false, params?.status ?? ''],
     queryFn: () => api<Booking[]>(`/bookings${qs ? `?${qs}` : ''}`),
+  });
+}
+
+/**
+ * Per-night approved head counts, for the capacity warning. Public and
+ * anonymous, like blackouts and events — it is an availability fact about the
+ * camp. The per-booking breakdown that used to feed this is now withheld from
+ * callers who may not see whose stay it is; see `bookings::occupancy`.
+ */
+export function useOccupancy() {
+  return useQuery({
+    queryKey: ['bookings-occupancy'],
+    queryFn: () => api<DayOccupancy[]>('/bookings/occupancy', { anonymous: true }),
   });
 }
 
@@ -300,14 +314,17 @@ export function useCalendarData() {
   const bookings = useBookings();
   const blackouts = useBlackouts();
   const events = useEvents();
+  const occupancy = useOccupancy();
   const config = useConfig();
 
   return {
     bookings: bookings.data ?? [],
     blackouts: blackouts.data ?? [],
     events: events.data ?? [],
+    occupancy: occupancy.data ?? [],
     capacityLimit: config.data?.capacity_adults ?? 10,
-    isLoading: bookings.isLoading || blackouts.isLoading || events.isLoading,
-    isError: bookings.isError || blackouts.isError || events.isError,
+    isLoading:
+      bookings.isLoading || blackouts.isLoading || events.isLoading || occupancy.isLoading,
+    isError: bookings.isError || blackouts.isError || events.isError || occupancy.isError,
   };
 }

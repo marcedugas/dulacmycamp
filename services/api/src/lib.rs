@@ -214,6 +214,10 @@ pub fn router(state: Shared) -> Router {
             get(bookings::deny_by_token).post(bookings::deny_by_token_submit),
         )
         .route("/bookings", get(bookings::list).post(bookings::create))
+        // Per-night head counts for the capacity warning. Public aggregate —
+        // the per-booking breakdown on `BookingView` is not. See
+        // `bookings::occupancy`.
+        .route("/bookings/occupancy", get(bookings::occupancy))
         .route("/bookings/{id}/cancel", put(bookings::cancel))
         // Cancel is the reversible tool and the one to reach for; the delete
         // is for rows that should never have been there at all.
@@ -224,6 +228,9 @@ pub fn router(state: Shared) -> Router {
         // Correcting what a guest submitted, not a state change — see
         // `bookings::admin_update_guests`.
         .route("/bookings/{id}/guests", put(bookings::admin_update_guests))
+        // The booker's own visibility preference. Not admin-only and not
+        // gated on status — see `bookings::update_privacy`.
+        .route("/bookings/{id}/privacy", put(bookings::update_privacy))
         .route("/bookings/{id}/approve", put(bookings::admin_approve))
         .route("/bookings/{id}/deny", put(bookings::admin_deny))
         // Admin entering a booking on a guest's behalf (phone call, in

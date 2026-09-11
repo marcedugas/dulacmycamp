@@ -20,11 +20,14 @@ const DEFAULT_HERO_SUBTITLE = 'A fishing camp in the heart of Dulac, Louisiana';
 
 /** Quick "are these dates free?" check, answered from data already on the page. */
 function AvailabilityWidget() {
-  const { bookings, blackouts, events } = useCalendarData();
+  const { bookings, blackouts, events, occupancy } = useCalendarData();
   const [from, setFrom] = useState(toKey(new Date()));
   const [to, setTo] = useState(toKey(addDays(new Date(), 3)));
 
-  const index = useMemo(() => buildIndex(bookings, blackouts, events), [bookings, blackouts, events]);
+  const index = useMemo(
+    () => buildIndex(bookings, blackouts, events, occupancy),
+    [bookings, blackouts, events, occupancy],
+  );
 
   const verdict = useMemo(() => {
     if (!from || !to || to <= from) return null;

@@ -12,7 +12,7 @@ import {
   startOfWeek,
 } from 'date-fns';
 import { ChevronLeft, ChevronRight, Flag, TriangleAlert } from 'lucide-react';
-import type { BlackoutDate, Booking, Holiday, SpecialEvent } from '../lib/types';
+import type { BlackoutDate, Booking, DayOccupancy, Holiday, SpecialEvent } from '../lib/types';
 import { daysInclusive, nightsOf, parseDay, toKey } from '../lib/dates';
 import { Button, cx } from './ui';
 
@@ -31,7 +31,12 @@ export interface DayCell {
   pending: Booking[];
   blackout: BlackoutDate | null;
   events: SpecialEvent[];
-  /** Adults on approved stays that night. */
+  /**
+   * Adults on approved stays that night, from the server's aggregate rather
+   * than summed from the bookings above — those no longer carry a head count
+   * unless the viewer may see whose stay it is, and the capacity warning has
+   * to work for everyone, including logged-out visitors.
+   */
   adults: number;
   /**
    * Reference-only US holiday marker, if any. Unlike every other field on
@@ -60,6 +65,7 @@ export function buildIndex(
   bookings: Booking[],
   blackouts: BlackoutDate[],
   events: SpecialEvent[],
+  occupancy: DayOccupancy[] = [],
   holidays: Holiday[] = [],
 ): Map<string, DayCell> {
   const map = new Map<string, DayCell>();
@@ -78,11 +84,14 @@ export function buildIndex(
       const cell = at(toKey(night));
       if (b.status === 'approved') {
         cell.approved.push(b);
-        cell.adults += b.guest_count_adults;
       } else {
         cell.pending.push(b);
       }
     }
+  }
+
+  for (const o of occupancy) {
+    at(o.date).adults = o.adults;
   }
 
   for (const bo of blackouts) {
@@ -144,6 +153,37 @@ function periodLabel(view: CalendarView, anchor: Date): string {
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
+/**
+ * The stays on a day whose booker chose to be seen.
+ *
+ * `guest_first_name` is the entire test, and the server is what decides it —
+ * it is sent only to a signed-in viewer, only for an approved stay, and only
+ * when the booker set the reservation to public (`bookings::shows_booker`).
+ * Nothing here re-derives that rule from `is_private` or the viewer's role:
+ * the client has never been the thing that decides who may be seen, and a
+ * second copy of the rule here is exactly how the two would drift apart.
+ */
+function namedStays(bookings: Booking[]): Booking[] {
+  return bookings.filter((b) => Boolean(b.guest_first_name));
+}
+
+/** "Jean · 3" — party size is adults plus kids, one number, since a cell has
+ *  room for a number and not a sentence. The breakdown is in the tooltip. */
+// The counts arrive with `guest_first_name` or not at all, so these only ever
+// run on a booking that has them; the fallbacks are a floor, not a case the
+// UI is expected to hit.
+function partySize(b: Booking): number {
+  return (b.guest_count_adults ?? 0) + (b.guest_count_kids ?? 0);
+}
+
+function partyBreakdown(b: Booking): string {
+  const adults = b.guest_count_adults ?? 0;
+  const kids = b.guest_count_kids ?? 0;
+  return `${b.guest_first_name} — ${adults} adult${adults === 1 ? '' : 's'}${
+    kids > 0 ? `, ${kids} kid${kids === 1 ? '' : 's'}` : ''
+  }`;
+}
+
 // ─────────────────────────── day cell ───────────────────────────
 
 interface DayProps {
@@ -162,6 +202,7 @@ function Day({ date, cell, dimmed, selected, isRangeEdge, capacityLimit, onClick
   const over = cell.adults > capacityLimit;
   const doubleBooked = cell.approved.length + cell.pending.length > 1;
   const clickable = Boolean(onClick);
+  const named = namedStays(cell.approved);
 
   return (
     <button
@@ -170,7 +211,9 @@ function Day({ date, cell, dimmed, selected, isRangeEdge, capacityLimit, onClick
       onClick={() => onClick?.(key)}
       aria-label={`${format(date, 'EEEE, MMMM d, yyyy')}${
         cell.blackout ? ', unavailable' : cell.approved.length ? ', booked' : ', available'
-      }${cell.holiday ? `, ${cell.holiday.name}` : ''}`}
+      }${named.map((b) => `, ${b.guest_first_name}, party of ${partySize(b)}`).join('')}${
+        cell.holiday ? `, ${cell.holiday.name}` : ''
+      }`}
       aria-pressed={selected}
       className={cx(
         'relative flex min-h-[84px] flex-col items-stretch gap-1 rounded-lg border p-1.5 text-left transition',
@@ -242,6 +285,20 @@ function Day({ date, cell, dimmed, selected, isRangeEdge, capacityLimit, onClick
           Pending{cell.pending.length > 1 ? ` ×${cell.pending.length}` : ''}
         </span>
       )}
+
+      {/* Who's coming, for the stays whose booker opted into being seen. It
+          sits under the Booked badge rather than replacing it: the badge is
+          the availability answer and stays identical either way, and this is
+          only ever an addition to it. */}
+      {named.map((b) => (
+        <span
+          key={b.id}
+          title={partyBreakdown(b)}
+          className="truncate text-[10px] font-semibold text-forest-700"
+        >
+          {b.guest_first_name} · {partySize(b)}
+        </span>
+      ))}
     </button>
   );
 }
@@ -289,11 +346,15 @@ function YearGrid({
                 return (
                   <span
                     key={toKey(d)}
-                    title={
-                      cell.holiday
-                        ? `${format(d, 'MMM d, yyyy')} — ${cell.holiday.name}`
-                        : format(d, 'MMM d, yyyy')
-                    }
+                    // The year view's cells are five-pixel squares, so the
+                    // names live in the tooltip rather than on the grid.
+                    title={[
+                      format(d, 'MMM d, yyyy'),
+                      cell.holiday?.name,
+                      ...namedStays(cell.approved).map(partyBreakdown),
+                    ]
+                      .filter(Boolean)
+                      .join(' — ')}
                     className={cx(
                       'relative grid h-5 place-items-center rounded text-[10px] font-medium',
                       tone,
@@ -358,6 +419,8 @@ interface Props {
   bookings: Booking[];
   blackouts: BlackoutDate[];
   events: SpecialEvent[];
+  /** Per-night approved adult totals — see [[useOccupancy]]. */
+  occupancy?: DayOccupancy[];
   /** Reference-only US holiday markers — see [[useHolidays]]. */
   holidays?: Holiday[];
   capacityLimit: number;
@@ -374,6 +437,7 @@ export default function CampCalendar({
   bookings,
   blackouts,
   events,
+  occupancy = [],
   holidays = [],
   capacityLimit,
   view,
@@ -384,8 +448,8 @@ export default function CampCalendar({
   onDayClick,
 }: Props) {
   const index = useMemo(
-    () => buildIndex(bookings, blackouts, events, holidays),
-    [bookings, blackouts, events, holidays],
+    () => buildIndex(bookings, blackouts, events, occupancy, holidays),
+    [bookings, blackouts, events, occupancy, holidays],
   );
   const days = useMemo(() => visibleDays(view, anchor), [view, anchor]);
 

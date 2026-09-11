@@ -12,7 +12,7 @@ import { formatRange, parseDay, toKey } from '../lib/dates';
 
 export default function CalendarPage() {
   const navigate = useNavigate();
-  const { bookings, blackouts, events, capacityLimit, isLoading } = useCalendarData();
+  const { bookings, blackouts, events, occupancy, capacityLimit, isLoading } = useCalendarData();
 
   const [view, setView] = useState<CalendarView>('month');
   const [anchor, setAnchor] = useState(new Date());
@@ -31,8 +31,8 @@ export default function CalendarPage() {
   const { data: holidays } = useHolidays(holidayYears);
 
   const index = useMemo(
-    () => buildIndex(bookings, blackouts, events),
-    [bookings, blackouts, events],
+    () => buildIndex(bookings, blackouts, events, occupancy),
+    [bookings, blackouts, events, occupancy],
   );
 
   /**
@@ -64,9 +64,12 @@ export default function CalendarPage() {
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-10">
+      {/* The old subtitle promised names were never shown, which is no longer
+          unconditionally true. The part people actually rely on still is, so
+          it leads: private is the default and what most stays will be. */}
       <PageHeader
         title="Camp calendar"
-        subtitle="Approved stays show as booked. Names stay private."
+        subtitle="Approved stays show as booked. A name appears only when that booker chose to share it."
         actions={
           <Button variant="ghost" onClick={() => void handleExport()}>
             <Download size={16} /> Export PDF
@@ -85,6 +88,7 @@ export default function CalendarPage() {
               bookings={bookings}
               blackouts={blackouts}
               events={events}
+              occupancy={occupancy}
               holidays={holidays}
               capacityLimit={capacityLimit}
               view={view}
