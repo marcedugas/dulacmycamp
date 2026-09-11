@@ -139,7 +139,10 @@ export interface Capacity {
   over_capacity: boolean;
 }
 
-export interface CreateBookingResponse {
+/** What every write that lands a booking returns — a guest's own request, an
+ *  admin entering one, and an admin editing one. Same shape because all three
+ *  can leave the camp overlapped or over capacity. */
+export interface BookingWriteResponse {
   booking: Booking;
   warning?: string;
   capacity: Capacity;

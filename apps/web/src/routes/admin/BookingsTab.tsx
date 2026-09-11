@@ -2,7 +2,18 @@ import { useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { addDays, format } from 'date-fns';
 import { toast } from 'sonner';
-import { Check, CheckCircle2, Dog, Flag, Plus, Trash2, TriangleAlert, Users, X } from 'lucide-react';
+import {
+  Check,
+  CheckCircle2,
+  Dog,
+  Flag,
+  Lock,
+  Pencil,
+  Plus,
+  Trash2,
+  TriangleAlert,
+  X,
+} from 'lucide-react';
 import {
   Button,
   Card,
@@ -18,13 +29,21 @@ import {
 } from '../../components/ui';
 import { ReservationVisibility } from '../../components/ReservationVisibility';
 import { api, ApiError } from '../../lib/api';
-import { useAdminCheckouts, useBookings, useUsers } from '../../lib/queries';
-import { formatRange, nightCount, parseDay, pluralNights, toKey } from '../../lib/dates';
+import { useAdminCheckouts, useBookings, useCalendarData, useUsers } from '../../lib/queries';
+import { buildIndex } from '../../components/CampCalendar';
+import {
+  daysInclusive,
+  formatRange,
+  nightCount,
+  parseDay,
+  pluralNights,
+  toKey,
+} from '../../lib/dates';
 import type {
   AdminCheckout,
   Booking,
   BookingStatus,
-  CreateBookingResponse,
+  BookingWriteResponse,
   DeleteSummary,
 } from '../../lib/types';
 
@@ -52,7 +71,7 @@ function findOverlaps(bookings: Booking[]): Set<string> {
  * `POST /api/admin/bookings`, which reuses the exact same booking-creation
  * logic `/book` does — same validation, blackout/overlap/capacity handling,
  * and full email chain — so the overlap/capacity warning here reads the
- * identical `CreateBookingResponse` shape the guest-facing form does.
+ * identical `BookingWriteResponse` shape the guest-facing form does.
  */
 function AddBookingModal({
   open,
@@ -77,7 +96,7 @@ function AddBookingModal({
   // Same default as the guest's own form — an admin entering a booking is
   // deciding for someone else, so the quiet answer has to be the private one.
   const [isPrivate, setIsPrivate] = useState(true);
-  const [result, setResult] = useState<CreateBookingResponse | null>(null);
+  const [result, setResult] = useState<BookingWriteResponse | null>(null);
 
   const trimmedEmail = email.trim().toLowerCase();
   const matchedUser = trimmedEmail
@@ -100,7 +119,7 @@ function AddBookingModal({
 
   const create = useMutation({
     mutationFn: () =>
-      api<CreateBookingResponse>('/admin/bookings', {
+      api<BookingWriteResponse>('/admin/bookings', {
         method: 'POST',
         body: {
           email: trimmedEmail,
@@ -259,12 +278,20 @@ function AddBookingModal({
 }
 
 /**
- * Corrects the adult/kid counts on a booking a guest already submitted — the
- * guest can't change them after the fact, so this is how a wrong number gets
- * fixed. Works on any status. The guest is emailed only if a number actually
- * moves; re-saving the same figures is silent.
+ * Corrects what a guest submitted — dates and party size — on a booking they
+ * can no longer change themselves. Works on any status: an approved stay is
+ * just as likely to have the wrong number on it as a pending one, and this is
+ * a correction rather than a state change.
+ *
+ * Overlaps and blackouts are surfaced but never block the save, which is the
+ * deliberate difference from the guest-facing form: there a blackout is a hard
+ * 409, because a guest is being told the camp is closed. Here the admin *is*
+ * the camp, and a tool for fixing reality cannot refuse to describe it.
+ *
+ * The guest is emailed once, covering whatever actually moved. Re-saving a
+ * booking exactly as it was is silent.
  */
-function EditGuestsModal({
+function EditBookingModal({
   booking,
   onClose,
   onSaved,
@@ -275,34 +302,144 @@ function EditGuestsModal({
 }) {
   // An admin always receives the real counts, so these fallbacks are a floor
   // for the type rather than a state the panel reaches.
+  const [checkIn, setCheckIn] = useState(booking.check_in);
+  const [checkOut, setCheckOut] = useState(booking.check_out);
   const [adults, setAdults] = useState(booking.guest_count_adults ?? 1);
   const [kids, setKids] = useState(booking.guest_count_kids ?? 0);
+
+  const { bookings, blackouts, events, occupancy } = useCalendarData();
+
+  const datesValid = Boolean(checkIn && checkOut && checkOut > checkIn);
   const unchanged =
-    adults === (booking.guest_count_adults ?? 1) && kids === (booking.guest_count_kids ?? 0);
+    checkIn === booking.check_in &&
+    checkOut === booking.check_out &&
+    adults === (booking.guest_count_adults ?? 1) &&
+    kids === (booking.guest_count_kids ?? 0);
+
+  /**
+   * What the proposed nights already hold — the same read of the same index
+   * the guest-facing /book form does, so the two describe a collision
+   * identically.
+   *
+   * The booking being edited is filtered out first: left in, every stay would
+   * report overlapping itself the moment the modal opened. That mirrors the
+   * `exclude` the server passes to its own `assess_stay`.
+   */
+  const conflicts = useMemo(() => {
+    if (!datesValid) return null;
+    const others = bookings.filter((b) => b.id !== booking.id);
+    const index = buildIndex(others, blackouts, events, occupancy);
+    const nights = daysInclusive(parseDay(checkIn), addDays(parseDay(checkOut), -1));
+
+    const blackoutReasons = new Set<string>();
+    let bookedNights = 0;
+    let pendingNights = 0;
+    for (const n of nights) {
+      const cell = index.get(toKey(n));
+      if (!cell) continue;
+      if (cell.blackout) blackoutReasons.add(cell.blackout.reason ?? 'Camp closed');
+      if (cell.approved.length) bookedNights += 1;
+      if (cell.pending.length) pendingNights += 1;
+    }
+    return { blackoutReasons: [...blackoutReasons], bookedNights, pendingNights };
+  }, [datesValid, checkIn, checkOut, bookings, blackouts, events, occupancy, booking.id]);
 
   const save = useMutation({
     mutationFn: () =>
-      api(`/bookings/${booking.id}/guests`, {
+      api<BookingWriteResponse>(`/bookings/${booking.id}/edit`, {
         method: 'PUT',
-        body: { guest_count_adults: adults, guest_count_kids: kids },
+        body: {
+          check_in: checkIn,
+          check_out: checkOut,
+          guest_count_adults: adults,
+          guest_count_kids: kids,
+        },
       }),
-    onSuccess: () => {
-      toast.success('Guest count updated. The guest has been emailed the new numbers.');
+    onSuccess: (res) => {
+      // The server re-runs the same assessment against real rows; if it has
+      // something to say, say it rather than a bare success.
+      toast.success(
+        res.warning
+          ? `Booking updated — the guest has been emailed. ${res.warning}`
+          : 'Booking updated. The guest has been emailed what changed.',
+      );
       onSaved();
       onClose();
     },
     onError: (err: unknown) =>
-      toast.error(err instanceof ApiError ? err.message : 'Could not update the guest count.'),
+      toast.error(err instanceof ApiError ? err.message : 'Could not update that booking.'),
   });
 
   return (
-    <Modal open onClose={onClose} title="Edit guest count">
+    <Modal open onClose={onClose} title="Edit booking">
       <div className="space-y-4">
         <p className="text-sm text-charcoal">
-          <strong>{booking.guest_name ?? booking.guest_email}</strong>,{' '}
-          {formatRange(booking.check_in, booking.check_out)}. Only the counts change &mdash; dates
-          and status stay as they are.
+          <strong>{booking.guest_name ?? booking.guest_email}</strong> &middot;{' '}
+          <StatusBadge status={booking.status} />
         </p>
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="Check in">
+            <Input
+              type="date"
+              required
+              value={checkIn}
+              onChange={(e) => setCheckIn(e.target.value)}
+            />
+          </Field>
+          <Field label="Check out">
+            <Input
+              type="date"
+              required
+              value={checkOut}
+              onChange={(e) => setCheckOut(e.target.value)}
+            />
+          </Field>
+        </div>
+
+        {datesValid ? (
+          <p className="-mt-2 text-xs text-muted">
+            {formatRange(checkIn, checkOut)} &middot;{' '}
+            {pluralNights(nightCount(checkIn, checkOut))}
+          </p>
+        ) : (
+          <p className="-mt-2 text-xs font-semibold text-clay">
+            Check-out has to be after check-in.
+          </p>
+        )}
+
+        {/* Same amber advisory the /book form shows for the same collision —
+            but here it never disables the save. */}
+        {conflicts && conflicts.bookedNights + conflicts.pendingNights > 0 && (
+          <div className="flex gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2.5 text-sm">
+            <TriangleAlert size={16} className="mt-0.5 shrink-0 text-amber-700" />
+            <div>
+              <p className="font-semibold text-amber-900">
+                These dates overlap an existing stay.
+              </p>
+              <p className="text-amber-800">
+                You can still save — the camp allows overlaps and the owner arbitrates.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* A blackout is a hard stop when a guest asks for the dates. For an
+            admin moving a booking it is a heads-up, so it says so plainly
+            rather than looking like the same refusal. */}
+        {conflicts && conflicts.blackoutReasons.length > 0 && (
+          <div className="flex gap-2 rounded-lg border border-sand bg-cream-dark px-3 py-2.5 text-sm">
+            <Lock size={16} className="mt-0.5 shrink-0 text-charcoal" />
+            <div>
+              <p className="font-semibold text-charcoal">These dates are blacked out.</p>
+              <p className="text-muted">
+                {conflicts.blackoutReasons.join(' · ')} — saving anyway is allowed, since you are
+                the one who sets the blackouts.
+              </p>
+            </div>
+          </div>
+        )}
+
         <div className="grid gap-4 sm:grid-cols-2">
           <Field label="Adults">
             <CountInput min={1} max={30} value={adults} onChange={setAdults} />
@@ -311,16 +448,22 @@ function EditGuestsModal({
             <CountInput min={0} max={30} value={kids} onChange={setKids} />
           </Field>
         </div>
+
         <p className="text-xs text-muted">
           {unchanged
-            ? 'No change yet — the guest is only emailed if a number actually moves.'
-            : 'The guest will be emailed the corrected numbers.'}
+            ? 'No change yet — the guest is only emailed if something actually moves.'
+            : 'The guest will be emailed a summary of what changed. Status stays as it is.'}
         </p>
+
         <div className="flex justify-end gap-2">
           <Button variant="ghost" type="button" onClick={onClose}>
             Cancel
           </Button>
-          <Button type="button" disabled={save.isPending || unchanged} onClick={() => save.mutate()}>
+          <Button
+            type="button"
+            disabled={save.isPending || unchanged || !datesValid}
+            onClick={() => save.mutate()}
+          >
             {save.isPending ? 'Saving…' : 'Save'}
           </Button>
         </div>
@@ -341,7 +484,7 @@ export default function BookingsTab() {
   const [details, setDetails] = useState<Booking | null>(null);
   const [viewingCheckout, setViewingCheckout] = useState<Booking | null>(null);
   const [deleting, setDeleting] = useState<Booking | null>(null);
-  const [editingGuests, setEditingGuests] = useState<Booking | null>(null);
+  const [editing, setEditing] = useState<Booking | null>(null);
   const [adding, setAdding] = useState(false);
   const { data: checkouts } = useAdminCheckouts();
   const checkoutDetail: AdminCheckout | undefined = viewingCheckout
@@ -552,10 +695,10 @@ export default function BookingsTab() {
                         <Button
                           size="sm"
                           variant="ghost"
-                          title="Correct the adult/kid count"
-                          onClick={() => setEditingGuests(b)}
+                          title="Correct the dates or the adult/kid count"
+                          onClick={() => setEditing(b)}
                         >
-                          <Users size={14} /> Guests
+                          <Pencil size={14} /> Edit
                         </Button>
                         {(b.status === 'approved' || b.status === 'pending') && (
                           <Button
@@ -730,12 +873,12 @@ export default function BookingsTab() {
         </div>
       </Modal>
 
-      {editingGuests && (
-        <EditGuestsModal
-          // Fresh counts for each booking opened, never the last one's.
-          key={editingGuests.id}
-          booking={editingGuests}
-          onClose={() => setEditingGuests(null)}
+      {editing && (
+        <EditBookingModal
+          // Fresh fields for each booking opened, never the last one's.
+          key={editing.id}
+          booking={editing}
+          onClose={() => setEditing(null)}
           onSaved={invalidate}
         />
       )}

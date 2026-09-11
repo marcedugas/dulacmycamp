@@ -225,9 +225,12 @@ pub fn router(state: Shared) -> Router {
             "/bookings/{id}",
             get(bookings::get_one).delete(bookings::admin_delete),
         )
-        // Correcting what a guest submitted, not a state change — see
-        // `bookings::admin_update_guests`.
-        .route("/bookings/{id}/guests", put(bookings::admin_update_guests))
+        // Correcting what a guest submitted — dates and party size — rather
+        // than a state change, and so not gated on status the way approve,
+        // deny and delete are. Renamed from `/guests` when it grew past guest
+        // counts; the admin panel is its only caller. See
+        // `bookings::admin_update_booking`.
+        .route("/bookings/{id}/edit", put(bookings::admin_update_booking))
         // The booker's own visibility preference. Not admin-only and not
         // gated on status — see `bookings::update_privacy`.
         .route("/bookings/{id}/privacy", put(bookings::update_privacy))

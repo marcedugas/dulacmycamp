@@ -10,7 +10,7 @@ import { ReservationVisibility } from '../components/ReservationVisibility';
 import { api, ApiError } from '../lib/api';
 import { useCalendarData } from '../lib/queries';
 import { daysInclusive, formatRange, nightCount, parseDay, pluralNights, toKey } from '../lib/dates';
-import type { CreateBookingResponse } from '../lib/types';
+import type { BookingWriteResponse } from '../lib/types';
 
 export default function BookPage() {
   const [params] = useSearchParams();
@@ -27,7 +27,7 @@ export default function BookPage() {
   // Private until the booker says otherwise, matching the column default.
   const [isPrivate, setIsPrivate] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [done, setDone] = useState<CreateBookingResponse | null>(null);
+  const [done, setDone] = useState<BookingWriteResponse | null>(null);
 
   const index = useMemo(
     () => buildIndex(bookings, blackouts, events, occupancy),
@@ -72,7 +72,7 @@ export default function BookPage() {
     e.preventDefault();
     setBusy(true);
     try {
-      const res = await api<CreateBookingResponse>('/bookings', {
+      const res = await api<BookingWriteResponse>('/bookings', {
         method: 'POST',
         body: {
           check_in: checkIn,
