@@ -6,13 +6,21 @@ import { CalendarPlus, Download } from 'lucide-react';
 import CampCalendar, { Legend, buildIndex, visibleDays } from '../components/CampCalendar';
 import type { CalendarView } from '../components/CampCalendar';
 import { Button, Card, PageHeader, Spinner } from '../components/ui';
+import { useAuth } from '../lib/auth';
 import { useCalendarData, useHolidays } from '../lib/queries';
 import { exportCalendarPdf } from '../lib/pdf';
 import { formatRange, parseDay, toKey } from '../lib/dates';
 
 export default function CalendarPage() {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const { bookings, blackouts, events, occupancy, capacityLimit, isLoading } = useCalendarData();
+
+  // Mirrors the server's `User::sees_guest_details`: admins and anyone
+  // flagged as an owner. They are the only viewers who are shown a booker on
+  // a stay that isn't confirmed, so they are the only ones for whom
+  // "confirmed or not?" is a question the calendar has to answer.
+  const seesGuestDetails = Boolean(user && (user.role === 'admin' || user.is_owner));
 
   const [view, setView] = useState<CalendarView>('month');
   const [anchor, setAnchor] = useState(new Date());
@@ -89,6 +97,7 @@ export default function CalendarPage() {
               blackouts={blackouts}
               events={events}
               occupancy={occupancy}
+              showStatus={seesGuestDetails}
               holidays={holidays}
               capacityLimit={capacityLimit}
               view={view}
