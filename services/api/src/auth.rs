@@ -327,13 +327,14 @@ pub async fn me(AuthUser(user): AuthUser) -> Json<User> {
     Json(user)
 }
 
-// ─────────────────────────── password login (admins) ───────────────────────────
+// ─────────────────────────── password login ───────────────────────────
 //
-// Additive to the OTP flow above, never a replacement. An admin may hold a
-// password *and* keep requesting codes; a guest can do neither. The session
-// this issues is the same `issue_token` session OTP issues — same claims, same
-// expiry — so nothing downstream can tell how someone signed in, and nothing
-// downstream has to care.
+// Additive to the OTP flow above, never a replacement. Any account — guest,
+// family, or admin — may hold a password and keep requesting codes; setting
+// one never turns codes off. The session this issues is the same
+// `issue_token` session OTP issues — same claims, same expiry — so nothing
+// downstream can tell how someone signed in, and nothing downstream has to
+// care.
 
 #[derive(Debug, Deserialize)]
 pub struct SetPassword {
@@ -350,9 +351,6 @@ pub async fn set_password(
     AuthUser(user): AuthUser,
     Json(body): Json<SetPassword>,
 ) -> ApiResult<Json<MessageResponse>> {
-    // Guests are refused explicitly rather than vaguely: this is a rule about
-    // who the feature is for, not a secret, and the caller is authenticated
-    // already, so there is nothing to give away.
     require_password_eligible(&user)?;
 
     let hash = password::hash(&body.password).map_err(AppError::BadRequest)?;
@@ -360,8 +358,9 @@ pub async fn set_password(
     users::set_password_hash(&state.db, user.id, &hash).await?;
 
     // Not a confirmation step — the change has already happened — but the one
-    // signal that would tell an admin their session had been taken over.
-    tracing::info!(user_id = %user.id, replacing, "admin password set");
+    // signal that would tell the account's owner their session had been taken
+    // over.
+    tracing::info!(user_id = %user.id, role = %user.role, replacing, "password set");
     email::spawn(
         state.clone(),
         user.email.clone(),
@@ -377,16 +376,19 @@ pub async fn set_password(
     }))
 }
 
-/// Guests are refused explicitly rather than vaguely: this is a rule about who
-/// the feature is for, not a secret, and the caller is authenticated already,
-/// so there is nothing to give away.
-fn require_password_eligible(user: &User) -> Result<(), AppError> {
-    if user.is_admin() {
-        return Ok(());
-    }
-    Err(AppError::Forbidden(
-        "Password sign-in is for admin accounts. Guests sign in with an emailed code.".into(),
-    ))
+/// Every authenticated, active account is eligible to set its own password —
+/// this used to be admin-only, but the Argon2id hashing, rate limiting, and
+/// "password changed" notification underneath have no role dependency, so
+/// there was nothing admin-specific left to justify the restriction.
+///
+/// The one state that would still legitimately need excluding here — a
+/// blocked account — never reaches this function to begin with: `set_password`
+/// takes an [`AuthUser`], and that extractor already runs [`require_active`]
+/// before the handler body sees the user. Kept as a named, callable check
+/// rather than inlined (or removed) so that invariant stays visible and
+/// directly testable, instead of becoming implicit tribal knowledge.
+fn require_password_eligible(_user: &User) -> Result<(), AppError> {
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -397,17 +399,19 @@ pub struct LoginPassword {
 
 /// The single answer to every way a password login can fail.
 ///
-/// Unknown address, known address that is a guest, admin who never set a
-/// password, admin with a password who typed it wrong — all identical, so the
-/// endpoint cannot be used to discover which addresses exist, which of them
-/// are admins, or which have a password. The only thing that varies is the
-/// rate-limit refusal, which is about the caller, not the account.
+/// Unknown address, an account that has never set a password, an account with
+/// a password who typed it wrong — all identical, so the endpoint cannot be
+/// used to discover which addresses exist, or which have a password set. The
+/// only things that vary are the rate-limit refusal, which is about the
+/// caller rather than the account, and a blocked account (see
+/// [`authenticate`]), which is already no secret — `request_otp` reveals it
+/// too.
 fn invalid_credentials() -> AppError {
     AppError::Unauthorized("That email and password don't match an account.".into())
 }
 
-/// `POST /auth/login-password` — public. Trades an admin's email and password
-/// for the same JWT `verify_otp` issues.
+/// `POST /auth/login-password` — public. Trades an account's email and
+/// password for the same JWT `verify_otp` issues.
 pub async fn login_password(
     State(state): State<Shared>,
     headers: HeaderMap,
@@ -459,14 +463,22 @@ pub async fn login_password(
 /// Pure, and lifted out of the handler on purpose: "every way of failing looks
 /// the same from outside" is the security property of this endpoint, and it is
 /// only worth claiming if it can be tested directly. See the tests below.
+///
+/// The blocked check here is new now that password login is open to roles
+/// that can actually be blocked (an admin never can, so this branch was
+/// unreachable before). It comes before the password comparison, and reports
+/// the specific `blocked()` error rather than the generic one above — matching
+/// `request_otp`, which already refuses a blocked address outright rather
+/// than pretending a code was sent. Nothing new leaks: the same fact is
+/// already obtainable from that public, unauthenticated endpoint with no
+/// password guess required at all.
 fn authenticate(
     found: Option<&users::UserWithHash>,
     password_matches: bool,
 ) -> Result<&User, AppError> {
     match found {
-        Some(f) if f.user.is_admin() && f.password_hash.is_some() && password_matches => {
-            Ok(&f.user)
-        }
+        Some(f) if f.user.is_blocked() => Err(blocked()),
+        Some(f) if f.password_hash.is_some() && password_matches => Ok(&f.user),
         _ => Err(invalid_credentials()),
     }
 }
@@ -528,8 +540,9 @@ mod tests {
     // ─────────────── the generic-failure property ───────────────
 
     /// The point of the endpoint's error handling: an attacker must not be
-    /// able to tell an unknown address from a guest, from an admin who never
-    /// set a password, from an admin who set one and had it typed wrong.
+    /// able to tell an unknown address from one that has never set a
+    /// password, from one that set a password and had it typed wrong —
+    /// whatever role the account holds.
     ///
     /// Compared as rendered responses, not as enum variants — the shape the
     /// caller actually receives is the thing that must not vary.
@@ -540,15 +553,15 @@ mod tests {
         let cases: Vec<(&str, AppError)> = vec![
             // No account at that address at all.
             ("unknown email", authenticate(None, false).unwrap_err()),
-            // The address exists, and even matched — but it is a guest.
-            (
-                "guest with a password somehow set",
-                authenticate(Some(&row("guest", Some(hash))), true).unwrap_err(),
-            ),
             // A guest, the ordinary case: no password to check.
             (
                 "guest with no password",
                 authenticate(Some(&row("guest", None)), false).unwrap_err(),
+            ),
+            // A family account that has one, and got it wrong.
+            (
+                "user role with the wrong password",
+                authenticate(Some(&row("user", Some(hash))), false).unwrap_err(),
             ),
             // An admin who has never set one.
             (
@@ -602,26 +615,61 @@ mod tests {
         assert!(authenticate(Some(&entry), true).is_ok());
     }
 
-    /// Role is re-read on every attempt, so a hash left on a demoted account
-    /// is inert even before `update_role` clears it.
+    /// The point of this whole change: a guest, not just an admin, can now
+    /// authenticate with a password.
     #[test]
-    fn a_demoted_admin_cannot_use_a_leftover_hash() {
+    fn a_guest_with_a_matching_password_authenticates() {
         let hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        assert!(authenticate(Some(&row("guest", Some(hash))), true).is_err());
+        let entry = row("guest", Some(hash));
+        assert!(authenticate(Some(&entry), true).is_ok());
+    }
+
+    /// The third and last role, for the same reason.
+    #[test]
+    fn a_family_user_with_a_matching_password_authenticates() {
+        let hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let entry = row("user", Some(hash));
+        assert!(authenticate(Some(&entry), true).is_ok());
+    }
+
+    /// Was `a_demoted_admin_cannot_use_a_leftover_hash` before password login
+    /// opened to every role: a hash left behind by a demotion out of admin
+    /// used to be dead weight because only admins could authenticate with one
+    /// at all. Now that guests are equally eligible, the same leftover hash
+    /// keeps working — which is also why `update_role` no longer clears it.
+    #[test]
+    fn a_former_admins_leftover_hash_still_works_now_that_guests_are_eligible() {
+        let hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert!(authenticate(Some(&row("guest", Some(hash))), true).is_ok());
+    }
+
+    /// A blocked account is refused even with the exact right password, and
+    /// with the specific `blocked()` message rather than the generic one —
+    /// unlike every case above, which must render identically to each other.
+    #[tokio::test]
+    async fn a_blocked_accounts_password_login_is_refused_even_with_the_right_password() {
+        let hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut entry = row("guest", Some(hash));
+        entry.user.blocked_at = Some(Utc::now());
+
+        let err = authenticate(Some(&entry), true).expect_err("a blocked account must be refused");
+        let (status, body) = rendered(err).await;
+        assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+        assert!(String::from_utf8(body).unwrap().contains("camp owner"));
     }
 
     // ─────────────── who may set a password ───────────────
 
-    /// A guest is refused with a 403 — a clear "this isn't for you", not the
-    /// deliberately vague login error. They are already authenticated here, so
-    /// there is nothing to withhold.
-    #[tokio::test]
-    async fn a_guest_is_forbidden_from_setting_a_password() {
-        let err = require_password_eligible(&user("guest", false))
-            .expect_err("a guest must not be able to set a password");
-        let (status, body) = rendered(err).await;
-        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
-        assert!(String::from_utf8(body).unwrap().contains("admin"));
+    /// The point of this whole change: a guest, not just an admin, can now
+    /// set a password.
+    #[test]
+    fn a_guest_may_set_a_password() {
+        assert!(require_password_eligible(&user("guest", false)).is_ok());
+    }
+
+    #[test]
+    fn a_family_user_may_set_a_password() {
+        assert!(require_password_eligible(&user("user", false)).is_ok());
     }
 
     #[test]

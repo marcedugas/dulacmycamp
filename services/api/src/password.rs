@@ -1,12 +1,12 @@
-//! Password hashing for the optional admin password login.
+//! Password hashing for the optional password login, open to any account.
 //!
 //! argon2id with the crate's default parameters, stored as a PHC string in
 //! `users.password_hash` — never plaintext, and never logged. The same choice
 //! the sibling ShiftScheduler app made, so the two apps don't drift.
 //!
-//! Policy is deliberately thin: a length floor and nothing else. This gates a
-//! handful of trusted admin accounts who also still have OTP, so composition
-//! rules would buy irritation rather than security.
+//! Policy is deliberately thin: a length floor and nothing else. Every account
+//! this gates also still has OTP as a backup regardless of role, so
+//! composition rules would buy irritation rather than security.
 
 use argon2::{
     Argon2,
