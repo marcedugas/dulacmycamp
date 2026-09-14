@@ -113,12 +113,14 @@ struct SettingsRow {
     camp_address: Option<String>,
     hero_image_url: Option<String>,
     guest_photos_url: Option<String>,
+    venmo_handle: Option<String>,
+    venmo_enabled: bool,
 }
 
 async fn fetch_settings(db: &PgPool) -> Result<SettingsRow, sqlx::Error> {
     sqlx::query_as::<_, SettingsRow>(
         "SELECT hero_title, hero_subtitle, about_camp_text, about_dulac_text, last_island_text,
-                camp_address, hero_image_url, guest_photos_url
+                camp_address, hero_image_url, guest_photos_url, venmo_handle, venmo_enabled
          FROM site_settings WHERE id = $1",
     )
     .bind(SETTINGS_ID)
@@ -172,6 +174,22 @@ pub struct PublicSiteContent {
     pub rules: Vec<RulePublic>,
     pub amenities: Vec<AmenityPublic>,
     pub gallery: Vec<GalleryPublic>,
+    /// The Venmo donation prompt's handle, or `None` if the admin hasn't
+    /// turned it on or hasn't set one — same "absent means don't render"
+    /// convention as `camp_address`. Computed here rather than shipping
+    /// `venmo_enabled` alongside a raw handle, so there is exactly one way
+    /// for the frontend to get this wrong: forgetting to check for `None`.
+    pub venmo_handle: Option<String>,
+}
+
+/// The handle to expose on the public payload — `None` unless the prompt is
+/// both turned on and has a handle set, so the frontend can render on
+/// presence alone rather than re-checking a separate flag.
+fn public_venmo_handle(handle: Option<String>, enabled: bool) -> Option<String> {
+    if !enabled {
+        return None;
+    }
+    handle.filter(|h| !h.trim().is_empty())
 }
 
 /// `GET /api/site-content` — public, no auth. Everything the landing page
@@ -195,6 +213,8 @@ pub async fn get_site_content(State(state): State<Shared>) -> ApiResult<Json<Pub
     .fetch_all(&state.db)
     .await?;
 
+    let venmo_handle = public_venmo_handle(settings.venmo_handle, settings.venmo_enabled);
+
     Ok(Json(PublicSiteContent {
         hero_title: settings.hero_title,
         hero_subtitle: settings.hero_subtitle,
@@ -206,6 +226,7 @@ pub async fn get_site_content(State(state): State<Shared>) -> ApiResult<Json<Pub
         rules,
         amenities,
         gallery,
+        venmo_handle,
     }))
 }
 
@@ -271,6 +292,8 @@ pub struct UpdateSettings {
     pub last_island_text: String,
     pub camp_address: Option<String>,
     pub guest_photos_url: Option<String>,
+    pub venmo_handle: Option<String>,
+    pub venmo_enabled: bool,
 }
 
 /// `PUT /api/admin/site-content/settings` — admin only.
@@ -308,10 +331,20 @@ pub async fn update_settings(
         .map(str::trim)
         .filter(|s| !s.is_empty());
 
+    // A leading '@' is the one mistake the helper text specifically warns
+    // against, so it's worth stripping rather than storing a handle that
+    // would build a broken venmo.com/u/@handle URL.
+    let venmo_handle = body
+        .venmo_handle
+        .as_deref()
+        .map(|s| s.trim().trim_start_matches('@'))
+        .filter(|s| !s.is_empty());
+
     sqlx::query(
         "UPDATE site_settings
          SET hero_title = $2, hero_subtitle = $3, about_camp_text = $4, about_dulac_text = $5,
              last_island_text = $6, camp_address = $7, guest_photos_url = $8,
+             venmo_handle = $9, venmo_enabled = $10,
              updated_at = now()
          WHERE id = $1",
     )
@@ -323,6 +356,8 @@ pub async fn update_settings(
     .bind(body.last_island_text.trim())
     .bind(camp_address)
     .bind(guest_photos_url)
+    .bind(venmo_handle)
+    .bind(body.venmo_enabled)
     .execute(&state.db)
     .await?;
 
@@ -749,6 +784,7 @@ mod tests {
             rules: vec![],
             amenities: vec![],
             gallery: vec![],
+            venmo_handle: None,
         };
         let json = serde_json::to_value(&payload).unwrap();
         let object = json.as_object().unwrap();
@@ -776,6 +812,7 @@ mod tests {
             rules: vec![],
             amenities: vec![],
             gallery: vec![],
+            venmo_handle: None,
         };
         let json = serde_json::to_value(&payload).unwrap();
 
@@ -797,6 +834,25 @@ mod tests {
             validate_upload("image/jpeg", MAX_IMAGE_BYTES + 1),
             Err(AppError::BadRequest(_))
         ));
+    }
+
+    #[test]
+    fn venmo_handle_is_hidden_when_disabled_even_if_set() {
+        assert_eq!(public_venmo_handle(Some("JeanL-Dugas".into()), false), None);
+    }
+
+    #[test]
+    fn venmo_handle_is_hidden_when_enabled_but_unset() {
+        assert_eq!(public_venmo_handle(None, true), None);
+        assert_eq!(public_venmo_handle(Some("   ".into()), true), None);
+    }
+
+    #[test]
+    fn venmo_handle_shows_only_when_enabled_and_set() {
+        assert_eq!(
+            public_venmo_handle(Some("JeanL-Dugas".into()), true),
+            Some("JeanL-Dugas".into())
+        );
     }
 
     #[test]

@@ -23,6 +23,40 @@ import { ABOUT_SECTIONS, ABOUT_SECTION_LABELS } from '../../lib/types';
 const onError = (err: unknown) =>
   toast.error(err instanceof ApiError ? err.message : 'That action failed.');
 
+/** A labeled on/off switch for a single boolean setting. */
+function Switch({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (next: boolean) => void;
+}) {
+  return (
+    <label className="flex cursor-pointer items-center gap-3">
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        onClick={() => onChange(!checked)}
+        className={cx(
+          'relative h-6 w-11 shrink-0 rounded-full border transition',
+          checked ? 'border-forest-600 bg-forest-600' : 'border-sand bg-cream-dark',
+        )}
+      >
+        <span
+          className={cx(
+            'absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition',
+            checked && 'translate-x-5',
+          )}
+        />
+      </button>
+      <span className="text-sm font-semibold text-charcoal">{label}</span>
+    </label>
+  );
+}
+
 // ─────────────────────────── hero / about / guest photos ───────────────────────────
 
 function SettingsSection({ content }: { content: SiteSettingsAdmin | undefined }) {
@@ -43,6 +77,8 @@ function SettingsSection({ content }: { content: SiteSettingsAdmin | undefined }
     last_island_text: '',
     camp_address: '',
     guest_photos_url: '',
+    venmo_handle: '',
+    venmo_enabled: false,
   });
 
   // Seed the form once real data arrives, without clobbering in-progress edits.
@@ -57,6 +93,8 @@ function SettingsSection({ content }: { content: SiteSettingsAdmin | undefined }
       last_island_text: content.last_island_text,
       camp_address: content.camp_address ?? '',
       guest_photos_url: content.guest_photos_url ?? '',
+      venmo_handle: content.venmo_handle ?? '',
+      venmo_enabled: content.venmo_enabled,
     });
     setSeeded(true);
   }, [content, seeded]);
@@ -255,6 +293,29 @@ function SettingsSection({ content }: { content: SiteSettingsAdmin | undefined }
         <div className="mt-4 flex justify-end">
           <Button size="sm" disabled={save.isPending} onClick={() => save.mutate(form)}>
             {save.isPending ? 'Saving…' : 'Save guest photos link'}
+          </Button>
+        </div>
+      </Card>
+
+      <Card>
+        <h3 className="mb-4 font-bold text-charcoal">Venmo donations</h3>
+        <Switch
+          label="Enable Venmo donation prompt on checkout page"
+          checked={form.venmo_enabled}
+          onChange={(venmo_enabled) => setForm((f) => ({ ...f, venmo_enabled }))}
+        />
+        <div className="mt-4">
+          <Field label="Venmo handle" hint="Just the username, e.g. JeanL-Dugas — no @ needed">
+            <Input
+              value={form.venmo_handle}
+              placeholder="JeanL-Dugas"
+              onChange={(e) => setForm((f) => ({ ...f, venmo_handle: e.target.value }))}
+            />
+          </Field>
+        </div>
+        <div className="mt-4 flex justify-end">
+          <Button size="sm" disabled={save.isPending} onClick={() => save.mutate(form)}>
+            {save.isPending ? 'Saving…' : 'Save Venmo donations'}
           </Button>
         </div>
       </Card>
