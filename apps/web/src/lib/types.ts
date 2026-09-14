@@ -198,6 +198,12 @@ export interface SiteContent {
   rules: { id: string; text: string }[];
   amenities: { id: string; label: string; icon: string | null }[];
   gallery: { id: string; url: string; caption: string | null; about_section: AboutSection }[];
+  /**
+   * The Venmo donation prompt's handle, shown on the checkout page. `null`
+   * when the admin has turned the prompt off or hasn't set a handle — both
+   * mean "render nothing", same convention as `camp_address`.
+   */
+  venmo_handle: string | null;
 }
 
 /**
@@ -240,6 +246,8 @@ export interface SiteSettingsAdmin {
   camp_address: string | null;
   hero_image_url: string | null;
   guest_photos_url: string | null;
+  venmo_handle: string | null;
+  venmo_enabled: boolean;
 }
 
 export interface RuleItem {

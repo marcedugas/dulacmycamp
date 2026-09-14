@@ -2,12 +2,55 @@ import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { BookOpen, CheckCircle2, ClipboardCheck, PartyPopper, TriangleAlert } from 'lucide-react';
+import { QRCodeSVG } from 'qrcode.react';
+import { BookOpen, CheckCircle2, ClipboardCheck, ExternalLink, HeartHandshake, PartyPopper, TriangleAlert } from 'lucide-react';
 import { Button, Card, EmptyState, Field, JournalStatusBadge, PageHeader, Spinner, Textarea, cx } from '../components/ui';
 import { api, ApiError } from '../lib/api';
-import { useChecklist, useCheckoutEligible, useJournalMine } from '../lib/queries';
+import { useChecklist, useCheckoutEligible, useJournalMine, useSiteContent } from '../lib/queries';
 import { formatRange, nightCount, pluralNights } from '../lib/dates';
 import type { CheckoutEligibleBooking, CheckoutResponse } from '../lib/types';
+
+/**
+ * Venmo donation prompt. Renders nothing when the admin has turned it off or
+ * hasn't set a handle — {@link useSiteContent}'s `venmo_handle` already
+ * encodes both cases as `null`, so there is nothing else to check here.
+ *
+ * Shown regardless of checklist/journal state (picking a booking, mid-form,
+ * or on the post-checkout thank-you screen) since it's a non-blocking aside,
+ * not a step in the checkout flow.
+ *
+ * The plain link matters as much as the QR code: a guest looking at this
+ * page on their own phone can't scan a code shown on that same screen, so
+ * the link has to work standalone.
+ */
+function VenmoDonationPrompt() {
+  const { data: content } = useSiteContent();
+  const handle = content?.venmo_handle;
+  if (!handle) return null;
+
+  const url = `https://venmo.com/u/${encodeURIComponent(handle)}`;
+
+  return (
+    <Card className="mt-6 text-center">
+      <HeartHandshake className="mx-auto mb-2 text-forest-600" size={26} />
+      <p className="text-sm text-muted">
+        We hope you enjoyed your stay! Please consider leaving a donation to help with some of the
+        operating expenses. Thank you.
+      </p>
+      <div className="mx-auto mt-4 w-fit rounded-lg border border-sand bg-white p-3">
+        <QRCodeSVG value={url} size={160} />
+      </div>
+      <a
+        href={url}
+        target="_blank"
+        rel="noreferrer noopener"
+        className="mt-4 inline-flex items-center gap-1.5 text-sm font-semibold text-forest-700 hover:underline"
+      >
+        Donate on Venmo <ExternalLink size={14} />
+      </a>
+    </Card>
+  );
+}
 
 function ChecklistForm({ booking, onDone }: { booking: CheckoutEligibleBooking; onDone: (bookingId: string) => void }) {
   const { data: items, isLoading } = useChecklist();
@@ -232,6 +275,8 @@ export default function Checkout() {
           </Button>
         </div>
       )}
+
+      {!isLoading && <VenmoDonationPrompt />}
     </div>
   );
 }

@@ -19,11 +19,12 @@
     "date-fns": "^4.4.0",
     "jspdf": "^4.2.1",
     "lucide-react": "^1.40.0",
+    "qrcode.react": "4.2.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-router-dom": "^7.18.3",
-    "sonner": "^2.0.8",
-    "serve": "^14.2.6"
+    "serve": "^14.2.6",
+    "sonner": "^2.0.8"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
