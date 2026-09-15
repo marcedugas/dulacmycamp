@@ -10,10 +10,9 @@ import type { MessageResponse, User } from '../lib/types';
 const MIN_PASSWORD_LEN = 10;
 
 /**
- * Optional password sign-in, for admins only — rendered nowhere else, and
- * refused by the server for anyone else regardless.
+ * Optional password sign-in, available to any signed-in account.
  *
- * This never removes the emailed-code route: an admin who sets a password
+ * This never removes the emailed-code route: an account that sets a password
  * keeps both, which is also what makes a forgotten password a non-event.
  */
 function PasswordSection({ hasPassword, onSaved }: { hasPassword: boolean; onSaved: () => Promise<void> }) {
@@ -55,7 +54,7 @@ function PasswordSection({ hasPassword, onSaved }: { hasPassword: boolean; onSav
       <p className="mb-4 text-sm text-muted">
         {hasPassword
           ? 'You can sign in with this password instead of waiting for a code. Emailed codes keep working either way.'
-          : `Admin accounts can sign in with a password instead of an emailed code. Setting one doesn't turn codes off — you'll still be able to use them.`}
+          : `You can sign in with a password instead of an emailed code. Setting one doesn't turn codes off — you'll still be able to use them.`}
       </p>
 
       <form onSubmit={submit} className="space-y-4">
@@ -155,9 +154,7 @@ export default function Profile() {
         </form>
       </Card>
 
-      {user?.role === 'admin' && (
-        <PasswordSection hasPassword={user.has_password} onSaved={refresh} />
-      )}
+      {user && <PasswordSection hasPassword={user.has_password} onSaved={refresh} />}
     </div>
   );
 }

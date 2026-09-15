@@ -31,7 +31,7 @@ pub struct User {
     /// able to act — see [`User::is_blocked`].
     pub blocked_at: Option<DateTime<Utc>>,
     pub avatar_url: Option<String>,
-    /// Whether an admin password is set — the boolean only, never the hash.
+    /// Whether a password is set — the boolean only, never the hash.
     /// Computed in SQL by `USER_COLUMNS` so `password_hash` itself is not in
     /// any query this struct is read from, and so cannot be serialised out.
     pub has_password: bool,
@@ -141,7 +141,7 @@ pub async fn find_with_password(
     .await
 }
 
-/// Stores (or replaces) an admin's password hash.
+/// Stores (or replaces) an account's password hash.
 pub async fn set_password_hash(db: &sqlx::PgPool, id: Uuid, hash: &str) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE users SET password_hash = $2 WHERE id = $1")
         .bind(id)
@@ -327,14 +327,10 @@ pub async fn update_role(
         ));
     }
 
-    // Dropping out of admin drops any password with it. Password login re-checks
-    // the role on every attempt, so a leftover hash would already be inert —
-    // but a credential nobody can use is a credential worth not keeping.
+    // A password is no longer tied to any particular role, so changing role
+    // leaves it exactly where it was — same as every other profile field.
     let updated = sqlx::query_as::<_, User>(&format!(
-        "UPDATE users
-         SET role = $2,
-             password_hash = CASE WHEN $2 = 'admin' THEN password_hash ELSE NULL END
-         WHERE id = $1 RETURNING {USER_COLUMNS}"
+        "UPDATE users SET role = $2 WHERE id = $1 RETURNING {USER_COLUMNS}"
     ))
     .bind(id)
     .bind(&body.role)

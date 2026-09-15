@@ -11,9 +11,9 @@ import { Button, Card, Field, Input } from '../components/ui';
  * Two-step passwordless login. There is no sign-up: the first code request
  * for an address creates the account server-side.
  *
- * Admins may also hold a password, which is a shortcut past the code round
- * trip rather than a replacement for it — either way in works, and the session
- * that comes back is the same one.
+ * Any account may also hold a password, which is a shortcut past the code
+ * round trip rather than a replacement for it — either way in works, and the
+ * session that comes back is the same one.
  */
 export default function Login() {
   const [step, setStep] = useState<'email' | 'code'>('email');
@@ -94,7 +94,7 @@ export default function Login() {
         <p className="mt-1 text-sm text-muted">
           {mode === 'otp'
             ? "No password needed — we'll email you a code."
-            : 'Enter your admin email and password.'}
+            : 'Enter your email and password.'}
         </p>
       </div>
 
@@ -178,9 +178,10 @@ export default function Login() {
         )}
       </Card>
 
-      {/* Password sign-in only works for admin accounts, but the link is shown
-          to everyone: hiding it would tell a visitor which addresses are
-          admins, and the endpoint behind it says nothing either way. */}
+      {/* Password sign-in works for any account, but plenty of accounts never
+          set one — the link is shown to everyone anyway: hiding it for those
+          would tell a visitor who has a password set, and the endpoint behind
+          it says nothing either way. */}
       {step === 'email' && (
         <button
           type="button"

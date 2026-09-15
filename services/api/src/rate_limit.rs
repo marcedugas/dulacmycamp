@@ -2,8 +2,8 @@
 //!
 //! * `POST /auth/request-otp` — sends an email on every accepted call, so this
 //!   is a spend guard.
-//! * `POST /auth/login-password` — the admin password login, where the point is
-//!   to make guessing expensive.
+//! * `POST /auth/login-password` — password login, open to any account, where
+//!   the point is to make guessing expensive.
 //!
 //! Deliberately in-process rather than Redis-backed. The camp runs a single
 //! API replica, and a family booking app does not justify another service to
@@ -14,10 +14,11 @@
 //!
 //! For the OTP spend guard that is plainly fine. For the password endpoint it
 //! is a real, if modest, weakness — a determined attacker who can time deploys
-//! gets extra attempts. It is accepted here because the exposure is small: the
-//! endpoint only ever answers for admin accounts, of which there are a handful,
-//! all of which also hold a `MIN_PASSWORD_LEN`-plus secret. If this service is
-//! ever replicated, the password limiter is the piece that has to move to
+//! gets extra attempts against one account. It is accepted here because the
+//! budget is per account (and per IP), not global: however many accounts hold
+//! a password, guessing any single one still costs a deploy-sized batch of
+//! attempts at a time against a `MIN_PASSWORD_LEN`-plus secret. If this service
+//! is ever replicated, the password limiter is the piece that has to move to
 //! shared storage first.
 
 use std::{
@@ -110,14 +111,15 @@ impl Default for RateLimits {
             //
             // Every attempt counts, not only the failures, which is the
             // stricter reading: an attacker gets five tries per window whether
-            // or not any of them land. The cost is that an admin signing in
-            // five times in fifteen minutes is asked to wait — and OTP is
-            // still right there, so they are inconvenienced, never locked out.
+            // or not any of them land. The cost is that an account holder
+            // signing in five times in fifteen minutes is asked to wait — and
+            // OTP is still right there, so they are inconvenienced, never
+            // locked out.
             password_per_ip: RateLimiter::new(5, Duration::from_secs(900)),
             // Same budget keyed by address. This one is deliberately
-            // exhaustible by a third party: someone else burning an admin's
-            // password budget costs that admin nothing but the password path,
-            // which OTP already backs up.
+            // exhaustible by a third party: someone else burning an account's
+            // password budget costs that account holder nothing but the
+            // password path, which OTP already backs up.
             password_per_email: RateLimiter::new(5, Duration::from_secs(900)),
         }
     }
