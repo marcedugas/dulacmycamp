@@ -17,7 +17,7 @@ import {
   Button,
   Card,
   EmptyState,
-  JournalStatusBadge,
+  JournalVisibilityBadge,
   PageHeader,
   Spinner,
   StatusBadge,
@@ -154,7 +154,9 @@ function BookingCard({ booking, onCancel, cancelling }: {
               <CheckCircle2 size={12} /> Checked out
             </span>
           )}
-          {booking.journal_status && <JournalStatusBadge status={booking.journal_status} />}
+          {booking.journal_visibility && (
+            <JournalVisibilityBadge visibility={booking.journal_visibility} />
+          )}
         </div>
       </div>
 
@@ -192,7 +194,7 @@ function BookingCard({ booking, onCancel, cancelling }: {
 
       <VisibilityToggle booking={booking} />
 
-      {(checkoutEligible || isJournalEligible(booking) || booking.journal_status === 'pending' || canCancel) && (
+      {(checkoutEligible || isJournalEligible(booking) || booking.journal_id || canCancel) && (
         <div className="mt-4 flex flex-wrap justify-end gap-2">
           {checkoutEligible && (
             <Link to="/checkout">
@@ -208,7 +210,7 @@ function BookingCard({ booking, onCancel, cancelling }: {
               </Button>
             </Link>
           )}
-          {booking.journal_status === 'pending' && booking.journal_id && (
+          {booking.journal_id && (
             <Link to={`/journal/new?entry_id=${booking.journal_id}`}>
               <Button size="sm" variant="ghost">
                 View / edit story

@@ -4,7 +4,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { QRCodeSVG } from 'qrcode.react';
 import { BookOpen, CheckCircle2, ClipboardCheck, ExternalLink, HeartHandshake, PartyPopper, TriangleAlert } from 'lucide-react';
-import { Button, Card, EmptyState, Field, JournalStatusBadge, PageHeader, Spinner, Textarea, cx } from '../components/ui';
+import { Button, Card, EmptyState, Field, JournalVisibilityBadge, PageHeader, Spinner, Textarea, cx } from '../components/ui';
 import { api, ApiError } from '../lib/api';
 import { useChecklist, useCheckoutEligible, useJournalMine, useSiteContent } from '../lib/queries';
 import { formatRange, nightCount, pluralNights } from '../lib/dates';
@@ -177,13 +177,12 @@ function JournalPrompt({ bookingId }: { bookingId: string }) {
 
       {existing ? (
         <>
-          <p className="mt-2 text-muted">
-            {existing.status === 'approved'
-              ? 'Thanks again for sharing your story!'
-              : 'Your story is still being reviewed.'}
-          </p>
+          <p className="mt-2 text-muted">Thanks again for sharing your story!</p>
           <div className="mt-4 flex justify-center">
-            <JournalStatusBadge status={existing.status} />
+            <JournalVisibilityBadge
+              visibility={existing.visibility}
+              archived={Boolean(existing.archived_at)}
+            />
           </div>
           <div className="mt-5">
             <Link to="/my-bookings">

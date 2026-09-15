@@ -1,6 +1,5 @@
 import { useState } from 'react';
 import { PageHeader, cx } from '../../components/ui';
-import { useJournalPendingCount } from '../../lib/queries';
 import { InboxView } from '../Inbox';
 import AccessTab from './AccessTab';
 import BookingsTab from './BookingsTab';
@@ -8,6 +7,7 @@ import BlackoutTab from './BlackoutTab';
 import CheckinInfoTab from './CheckinInfoTab';
 import ChecklistTab from './ChecklistTab';
 import EventsTab from './EventsTab';
+import FishSpeciesTab from './FishSpeciesTab';
 import JournalTab from './JournalTab';
 import SiteContentTab from './SiteContentTab';
 import UsersTab from './UsersTab';
@@ -19,6 +19,7 @@ const TABS = [
   'Checklist',
   'Check-In Info',
   'Journal',
+  'Fish Species',
   'Site Content',
   'Users',
   'Access',
@@ -28,7 +29,6 @@ type Tab = (typeof TABS)[number];
 
 export default function AdminPanel() {
   const [tab, setTab] = useState<Tab>('Bookings');
-  const pendingJournal = useJournalPendingCount();
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-10">
@@ -48,11 +48,6 @@ export default function AdminPanel() {
             )}
           >
             {t}
-            {t === 'Journal' && pendingJournal > 0 && (
-              <span className="min-w-[18px] rounded-full bg-clay px-1 text-[11px] font-bold leading-[18px] text-white">
-                {pendingJournal > 9 ? '9+' : pendingJournal}
-              </span>
-            )}
           </button>
         ))}
       </div>
@@ -64,6 +59,7 @@ export default function AdminPanel() {
       {tab === 'Checklist' && <ChecklistTab />}
       {tab === 'Check-In Info' && <CheckinInfoTab />}
       {tab === 'Journal' && <JournalTab />}
+      {tab === 'Fish Species' && <FishSpeciesTab />}
       {tab === 'Site Content' && <SiteContentTab />}
       {tab === 'Users' && <UsersTab />}
       {tab === 'Messages' && <InboxView all />}

@@ -12,14 +12,15 @@ import type {
   CheckoutEligibleBooking,
   ContentAccessSection,
   DayOccupancy,
+  FishSpecies,
   GalleryPhoto,
   GuestPhotosLink,
   Holiday,
   JournalEligibleBooking,
   JournalEntry,
+  JournalFeedPage,
   Message,
   MyStay,
-  PublicJournalPage,
   RuleItem,
   SiteContent,
   SiteSettingsAdmin,
@@ -217,15 +218,19 @@ export function useAdminCheckouts() {
 
 // ── camp journal ──
 
-/** Public, approved-only journal feed, paginated. */
-export function useJournalPublic(page = 1) {
+/**
+ * The journal feed, paginated. **Requires a login** — entries are scoped
+ * "family" vs "any registered account", so there is no anonymous tier the
+ * server could answer for.
+ */
+export function useJournalFeed(page = 1) {
   return useQuery({
-    queryKey: ['journal-public', page],
-    queryFn: () => api<PublicJournalPage>(`/journal?page=${page}`, { anonymous: true }),
+    queryKey: ['journal-feed', page],
+    queryFn: () => api<JournalFeedPage>(`/journal?page=${page}`),
   });
 }
 
-/** The caller's own journal entries, any status. */
+/** The caller's own journal entries, catches and photos included. */
 export function useJournalMine() {
   return useQuery({
     queryKey: ['journal-mine'],
@@ -233,7 +238,7 @@ export function useJournalMine() {
   });
 }
 
-/** Checked-out stays with no journal entry yet — drives /journal/new. */
+/** Started stays with no journal entry yet — drives /journal/new. */
 export function useJournalEligibleBookings() {
   return useQuery({
     queryKey: ['journal-eligible-bookings'],
@@ -241,23 +246,28 @@ export function useJournalEligibleBookings() {
   });
 }
 
-/** Admin-only: every journal entry, optionally filtered by status. */
-export function useJournalAdmin(status?: string) {
+/** Admin/owner: every entry, for the moderation table. */
+export function useJournalAdmin() {
   return useQuery({
-    queryKey: ['journal-admin', status ?? 'all'],
-    queryFn: () => api<AdminJournalEntry[]>(`/journal/admin${status ? `?status=${status}` : ''}`),
+    queryKey: ['journal-admin'],
+    queryFn: () => api<AdminJournalEntry[]>('/journal/admin'),
   });
 }
 
-/** Pending-review count, for the admin panel's Journal tab badge. */
-export function useJournalPendingCount(enabled = true) {
-  const { data } = useQuery({
-    queryKey: ['journal-admin', 'pending'],
-    queryFn: () => api<AdminJournalEntry[]>('/journal/admin?status=pending'),
-    enabled,
-    refetchInterval: 120_000,
+/** Active species only — the catch log's dropdown. */
+export function useFishSpecies() {
+  return useQuery({
+    queryKey: ['fish-species'],
+    queryFn: () => api<FishSpecies[]>('/fish-species'),
   });
-  return data?.length ?? 0;
+}
+
+/** Admin-only: every species, including deactivated ones. */
+export function useFishSpeciesAdmin() {
+  return useQuery({
+    queryKey: ['admin-fish-species'],
+    queryFn: () => api<FishSpecies[]>('/admin/fish-species'),
+  });
 }
 
 // ── check-in info / my stay ──

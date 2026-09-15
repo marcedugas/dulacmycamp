@@ -96,9 +96,17 @@ export default function App() {
               </RequireAuth>
             }
           />
+          {/* Was public. Journal entries are now scoped "family" vs "any
+              registered account", so there is no anonymous tier left to
+              serve — reading the journal takes a login like everything else
+              behind it. */}
           <Route
             path="/journal"
-            element={<Journal />}
+            element={
+              <RequireAuth>
+                <Journal />
+              </RequireAuth>
+            }
           />
           <Route
             path="/journal/new"

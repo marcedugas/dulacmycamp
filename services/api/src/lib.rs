@@ -14,6 +14,7 @@ pub mod content_access;
 pub mod email;
 pub mod email_templates;
 pub mod events;
+pub mod fish_species;
 pub mod holidays;
 pub mod journal;
 pub mod my_stay;
@@ -22,6 +23,7 @@ pub mod password;
 pub mod rate_limit;
 pub mod site_content;
 pub mod solunar;
+pub mod uploads;
 pub mod users;
 pub mod weather;
 
@@ -277,7 +279,7 @@ pub fn router(state: Shared) -> Router {
         .route(
             "/admin/site-content/hero-image",
             post(site_content::upload_hero_image)
-                .layer(DefaultBodyLimit::max(site_content::UPLOAD_REQUEST_LIMIT)),
+                .layer(DefaultBodyLimit::max(uploads::UPLOAD_REQUEST_LIMIT)),
         )
         .route(
             "/admin/rules",
@@ -299,7 +301,7 @@ pub fn router(state: Shared) -> Router {
             "/admin/gallery",
             get(site_content::list_gallery_admin)
                 .post(site_content::create_gallery_photo)
-                .layer(DefaultBodyLimit::max(site_content::UPLOAD_REQUEST_LIMIT)),
+                .layer(DefaultBodyLimit::max(uploads::UPLOAD_REQUEST_LIMIT)),
         )
         .route(
             "/admin/gallery/{id}",
@@ -323,21 +325,40 @@ pub fn router(state: Shared) -> Router {
         .route("/checkout", post(checkout::submit))
         .route("/admin/checkouts", get(checkout::admin_list))
         // ── journal ──
-        .route("/journal", get(journal::list_public).post(journal::create))
+        // The feed requires a login: entries are scoped "family" vs "any
+        // registered account", so there is no anonymous tier left to serve.
+        .route("/journal", get(journal::list_feed).post(journal::create))
         .route("/journal/mine", get(journal::list_mine))
         .route(
             "/journal/eligible-bookings",
             get(journal::eligible_bookings),
         )
         .route("/journal/admin", get(journal::admin_list))
+        // Above `/journal/{id}`: a literal segment that would otherwise be
+        // matched as an entry id.
+        .route("/journal/photos/{photo_id}", delete(journal::delete_photo))
         .route(
             "/journal/{id}",
-            put(journal::update).delete(journal::remove),
+            get(journal::get_one)
+                .put(journal::update)
+                .delete(journal::remove),
         )
-        .route("/journal/{id}/approve", put(journal::approve))
-        .route("/journal/{id}/reject", put(journal::reject))
+        .route(
+            "/journal/{id}/photos",
+            post(journal::upload_photo).layer(DefaultBodyLimit::max(uploads::UPLOAD_REQUEST_LIMIT)),
+        )
         .route("/journal/{id}/archive", put(journal::archive))
         .route("/journal/{id}/unarchive", put(journal::unarchive))
+        // ── fish species (the catch log's dropdown) ──
+        .route("/fish-species", get(fish_species::list_active))
+        .route(
+            "/admin/fish-species",
+            get(fish_species::list_all).post(fish_species::create),
+        )
+        .route(
+            "/admin/fish-species/{id}",
+            put(fish_species::update).delete(fish_species::remove),
+        )
         // ── check-in info ──
         // Access is derived from booking state (approved, not yet checked
         // out) — never a separate admin grant/revoke step.

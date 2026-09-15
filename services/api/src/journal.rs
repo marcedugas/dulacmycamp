@@ -1,25 +1,57 @@
-//! The camp journal: free-form guest stories tied 1:1 to a stay. Deliberately
-//! not a review system — no ratings, no stars, anywhere in this module or
-//! its responses.
+//! The camp journal: a per-stay memory log tied 1:1 to a booking — the
+//! story, what was caught, and photos from the trip. Deliberately not a
+//! review system — no ratings, no stars, anywhere in this module or its
+//! responses.
+//!
+//! Entries are self-published. There is no approval queue: what an author
+//! writes is live the moment they write it, scoped by the `visibility` they
+//! chose ([`VISIBILITY_PUBLIC`] or [`VISIBILITY_FAMILY`]). Admins and the
+//! camp owner moderate after the fact — edit, archive, or delete — rather
+//! than gating every story on the way in.
+//!
+//! "Public" here means *any registered account*, not the open internet: the
+//! feed requires a login, so there is no anonymous tier to leak into.
 
 use crate::{
     ApiResult, AppError, Shared,
-    auth::{AdminUser, AuthUser},
-    email, email_templates, notifications, users,
+    auth::AuthUser,
+    email, email_templates, notifications,
+    uploads::{bad_multipart, delete_upload_file, save_upload},
+    users::{self, User},
 };
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{Multipart, Path, Query, State},
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sqlx::{FromRow, PgPool};
+use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 fn app_url(state: &Shared) -> &str {
     state.cfg.frontend_url.trim_end_matches('/')
 }
+
+/// Readable by any registered account.
+pub const VISIBILITY_PUBLIC: &str = "public";
+/// Readable only by family (`user` role) accounts, plus admins and the owner.
+pub const VISIBILITY_FAMILY: &str = "family";
+
+/// Mirrors `journal_entries_visibility_valid` in migration 0016.
+pub const VISIBILITIES: [&str; 2] = [VISIBILITY_PUBLIC, VISIBILITY_FAMILY];
+
+fn validate_visibility(visibility: &str) -> ApiResult<()> {
+    if !VISIBILITIES.contains(&visibility) {
+        return Err(AppError::BadRequest(format!(
+            "'{visibility}' is not a visibility. Valid options: {}.",
+            VISIBILITIES.join(", ")
+        )));
+    }
+    Ok(())
+}
+
+// ─────────────────────────── eligibility ───────────────────────────
 
 /// Whether a booking qualifies to receive a journal entry: approved, the
 /// stay has *started* (`check_in <= today` — mid-stay, departure day, or
@@ -68,6 +100,81 @@ fn require_no_existing_entry(already: bool) -> ApiResult<()> {
     Ok(())
 }
 
+// ─────────────────────────── who may see what ───────────────────────────
+
+/// A viewer's standing relative to one entry, reduced to the three facts the
+/// rule actually turns on.
+#[derive(Debug, Clone, Copy)]
+pub struct ViewerContext {
+    pub is_author: bool,
+    /// Admin or camp owner — the moderation bypass.
+    pub moderates: bool,
+    /// The `user` (family) role. Admins and the owner come through
+    /// `moderates` instead, so this stays a plain role check.
+    pub is_family: bool,
+}
+
+impl ViewerContext {
+    fn of(viewer: &User, author_id: Uuid) -> Self {
+        Self {
+            is_author: viewer.id == author_id,
+            moderates: moderates(viewer),
+            is_family: viewer.role == "user",
+        }
+    }
+}
+
+/// Admins and the camp owner see and moderate everything, the same bypass
+/// the calendar gives them over private bookings.
+fn moderates(user: &User) -> bool {
+    user.is_admin() || user.is_owner
+}
+
+fn require_moderator(user: &User) -> ApiResult<()> {
+    if !moderates(user) {
+        return Err(AppError::Forbidden(
+            "Only an admin or the camp owner can do that.".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The whole visibility rule, in one place.
+///
+/// An author always sees their own entry — any visibility, archived or not —
+/// because it is theirs and hiding it from them would just look like data
+/// loss. A moderator sees everything for the same reason they can edit it.
+/// Everyone else sees live entries their role reaches.
+///
+/// [`feed_where_clause`] is the SQL form of exactly this; the two are
+/// checked against each other in the tests below.
+pub fn may_view(v: ViewerContext, visibility: &str, archived: bool) -> bool {
+    if v.is_author || v.moderates {
+        return true;
+    }
+    if archived {
+        return false;
+    }
+    match visibility {
+        VISIBILITY_PUBLIC => true,
+        VISIBILITY_FAMILY => v.is_family,
+        _ => false,
+    }
+}
+
+/// The SQL twin of [`may_view`], as a `WHERE` fragment over `je`.
+///
+/// `$1` is the viewer's id, `$2` whether they moderate, `$3` whether they are
+/// family. Kept as one string so the feed and its `count(*)` cannot drift.
+fn feed_where_clause() -> &'static str {
+    "(je.user_id = $1
+      OR $2
+      OR (je.archived_at IS NULL
+          AND (je.visibility = 'public' OR ($3 AND je.visibility = 'family'))))"
+}
+
+// ─────────────────────────── rows ───────────────────────────
+
 #[derive(Debug, Clone, Serialize, FromRow)]
 pub struct JournalEntry {
     pub id: Uuid,
@@ -75,52 +182,158 @@ pub struct JournalEntry {
     pub booking_id: Uuid,
     pub title: String,
     pub body: String,
-    pub status: String,
-    pub rejected_reason: Option<String>,
-    pub approved_at: Option<DateTime<Utc>>,
-    pub approved_by: Option<String>,
-    /// Set when an admin has quietly hidden this entry from the public feed
-    /// without un-approving it. Independent of `status`.
+    pub visibility: String,
+    /// Set when a moderator has quietly hidden this entry. Independent of
+    /// visibility: an archived entry is hidden from everyone but its author
+    /// and the moderators, whatever it says it is.
     pub archived_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
-const ENTRY_COLUMNS: &str = "id, user_id, booking_id, title, body, status, rejected_reason, \
-                             approved_at, approved_by, archived_at, created_at, updated_at";
+const ENTRY_COLUMNS: &str =
+    "id, user_id, booking_id, title, body, visibility, archived_at, created_at, updated_at";
 
-/// Only an approved entry can be archived — pending/rejected entries were
-/// never on the public feed in the first place, so there's nothing to hide.
-fn require_archivable(status: &str) -> ApiResult<()> {
-    if status != "approved" {
-        return Err(AppError::Conflict(format!(
-            "Only approved entries can be archived (this one is {status})."
-        )));
+/// One logged catch. Every measurement is optional — "a mess of trout" is a
+/// perfectly good catch log.
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct CatchRow {
+    pub id: Uuid,
+    pub species_id: Option<Uuid>,
+    /// Resolved from `fish_species`, so a renamed species reads correctly
+    /// everywhere without touching the catch rows.
+    pub species_name: Option<String>,
+    pub length_inches: Option<f64>,
+    pub weight_lbs: Option<f64>,
+    pub quantity: i32,
+    pub notes: Option<String>,
+    pub sort_order: i32,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct PhotoRow {
+    pub id: Uuid,
+    pub url: String,
+    pub caption: Option<String>,
+    pub sort_order: i32,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A child row plus the entry it hangs off, so one query can fetch them for
+/// a whole page of entries and [`hydrate`] can sort them out afterwards.
+#[derive(FromRow)]
+struct Owned<T> {
+    journal_entry_id: Uuid,
+    #[sqlx(flatten)]
+    child: T,
+}
+
+async fn catches_for(db: &PgPool, entry_ids: &[Uuid]) -> Result<Vec<Owned<CatchRow>>, sqlx::Error> {
+    sqlx::query_as::<_, Owned<CatchRow>>(
+        "SELECT c.journal_entry_id, c.id, c.species_id, s.name AS species_name,
+                c.length_inches, c.weight_lbs, c.quantity, c.notes, c.sort_order
+         FROM journal_catches c
+         LEFT JOIN fish_species s ON s.id = c.species_id
+         WHERE c.journal_entry_id = ANY($1)
+         ORDER BY c.sort_order, c.id",
+    )
+    .bind(entry_ids)
+    .fetch_all(db)
+    .await
+}
+
+async fn photos_for(db: &PgPool, entry_ids: &[Uuid]) -> Result<Vec<Owned<PhotoRow>>, sqlx::Error> {
+    sqlx::query_as::<_, Owned<PhotoRow>>(
+        "SELECT journal_entry_id, id, url, caption, sort_order, created_at
+         FROM journal_photos
+         WHERE journal_entry_id = ANY($1)
+         ORDER BY sort_order, created_at",
+    )
+    .bind(entry_ids)
+    .fetch_all(db)
+    .await
+}
+
+/// Attaches each entry's catches and photos in two queries rather than two
+/// per entry.
+async fn hydrate<T, F>(db: &PgPool, items: &mut [T], id_of: F) -> Result<(), sqlx::Error>
+where
+    F: Fn(&T) -> Uuid,
+    T: Hydratable,
+{
+    let ids: Vec<Uuid> = items.iter().map(&id_of).collect();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let catches = catches_for(db, &ids).await?;
+    let photos = photos_for(db, &ids).await?;
+
+    for item in items.iter_mut() {
+        let id = id_of(item);
+        item.set_catches(
+            catches
+                .iter()
+                .filter(|o| o.journal_entry_id == id)
+                .map(|o| o.child.clone())
+                .collect(),
+        );
+        item.set_photos(
+            photos
+                .iter()
+                .filter(|o| o.journal_entry_id == id)
+                .map(|o| o.child.clone())
+                .collect(),
+        );
     }
     Ok(())
 }
 
-// ─────────────────────────── public feed ───────────────────────────
+/// Lets [`hydrate`] fill any response shape that carries catches and photos.
+trait Hydratable {
+    fn set_catches(&mut self, catches: Vec<CatchRow>);
+    fn set_photos(&mut self, photos: Vec<PhotoRow>);
+}
+
+// ─────────────────────────── feed ───────────────────────────
 
 #[derive(Debug, Serialize)]
-pub struct PublicEntry {
+pub struct FeedEntry {
     pub id: Uuid,
     pub title: String,
     pub body: String,
+    pub visibility: String,
+    pub archived_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
-    pub approved_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
     pub guest_first_name: String,
     pub check_in: NaiveDate,
     pub check_out: NaiveDate,
+    /// So the reader's own entries can be labelled and offered an edit link
+    /// without the client having to know its own user id.
+    pub is_mine: bool,
+    pub catches: Vec<CatchRow>,
+    pub photos: Vec<PhotoRow>,
+}
+
+impl Hydratable for FeedEntry {
+    fn set_catches(&mut self, catches: Vec<CatchRow>) {
+        self.catches = catches;
+    }
+    fn set_photos(&mut self, photos: Vec<PhotoRow>) {
+        self.photos = photos;
+    }
 }
 
 #[derive(FromRow)]
-struct PublicRow {
+struct FeedRow {
     id: Uuid,
+    user_id: Uuid,
     title: String,
     body: String,
+    visibility: String,
+    archived_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
-    approved_at: Option<DateTime<Utc>>,
+    updated_at: DateTime<Utc>,
     full_name: Option<String>,
     check_in: NaiveDate,
     check_out: NaiveDate,
@@ -133,48 +346,70 @@ pub struct PageQuery {
     pub page: Option<i64>,
 }
 
-/// `GET /api/journal` — public, no auth. Approved entries only.
-pub async fn list_public(
+/// `GET /api/journal` — **requires a login.**
+///
+/// This endpoint used to be anonymous. It no longer can be: "public" now
+/// means "any registered account" rather than "the open internet", so there
+/// is no tier left that an anonymous caller belongs to. See [`may_view`] for
+/// what each role gets back.
+pub async fn list_feed(
     State(state): State<Shared>,
+    AuthUser(user): AuthUser,
     Query(q): Query<PageQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let page = q.page.unwrap_or(1).max(1);
     let offset = (page - 1) * PAGE_SIZE;
+    let moderator = moderates(&user);
+    let is_family = user.role == "user";
 
-    let rows = sqlx::query_as::<_, PublicRow>(
-        "SELECT je.id, je.title, je.body, je.created_at, je.approved_at,
-                u.full_name, b.check_in, b.check_out
+    let rows = sqlx::query_as::<_, FeedRow>(&format!(
+        "SELECT je.id, je.user_id, je.title, je.body, je.visibility, je.archived_at,
+                je.created_at, je.updated_at, u.full_name, b.check_in, b.check_out
          FROM journal_entries je
          JOIN users u ON u.id = je.user_id
          JOIN bookings b ON b.id = je.booking_id
-         WHERE je.status = 'approved' AND je.archived_at IS NULL
-         ORDER BY je.approved_at DESC NULLS LAST, je.created_at DESC
-         LIMIT $1 OFFSET $2",
-    )
+         WHERE {where_clause}
+         ORDER BY je.created_at DESC
+         LIMIT $4 OFFSET $5",
+        where_clause = feed_where_clause()
+    ))
+    .bind(user.id)
+    .bind(moderator)
+    .bind(is_family)
     .bind(PAGE_SIZE)
     .bind(offset)
     .fetch_all(&state.db)
     .await?;
 
-    let (total,): (i64,) = sqlx::query_as(
-        "SELECT count(*) FROM journal_entries WHERE status = 'approved' AND archived_at IS NULL",
-    )
+    let (total,): (i64,) = sqlx::query_as(&format!(
+        "SELECT count(*) FROM journal_entries je WHERE {where_clause}",
+        where_clause = feed_where_clause()
+    ))
+    .bind(user.id)
+    .bind(moderator)
+    .bind(is_family)
     .fetch_one(&state.db)
     .await?;
 
-    let entries: Vec<PublicEntry> = rows
+    let mut entries: Vec<FeedEntry> = rows
         .into_iter()
-        .map(|r| PublicEntry {
+        .map(|r| FeedEntry {
             id: r.id,
             title: r.title,
             body: r.body,
+            visibility: r.visibility,
+            archived_at: r.archived_at,
             created_at: r.created_at,
-            approved_at: r.approved_at,
+            updated_at: r.updated_at,
             guest_first_name: users::first_name(r.full_name.as_deref()),
             check_in: r.check_in,
             check_out: r.check_out,
+            is_mine: r.user_id == user.id,
+            catches: vec![],
+            photos: vec![],
         })
         .collect();
+    hydrate(&state.db, &mut entries, |e| e.id).await?;
 
     Ok(Json(json!({
         "entries": entries,
@@ -182,24 +417,92 @@ pub async fn list_public(
         "page_size": PAGE_SIZE,
         "total": total,
         "total_pages": (total as f64 / PAGE_SIZE as f64).ceil().max(1.0) as i64,
+        "moderator": moderator,
     })))
 }
 
-// ─────────────────────────── guest ───────────────────────────
+// ─────────────────────────── the author's own ───────────────────────────
 
-/// `GET /api/journal/mine` — every entry the caller has ever submitted,
-/// any status.
+/// An entry as its author (or a moderator) works on it: the whole thing,
+/// catches and photos included, so the edit form can seed itself from one
+/// request.
+#[derive(Debug, Serialize)]
+pub struct FullEntry {
+    #[serde(flatten)]
+    pub entry: JournalEntry,
+    pub catches: Vec<CatchRow>,
+    pub photos: Vec<PhotoRow>,
+}
+
+impl Hydratable for FullEntry {
+    fn set_catches(&mut self, catches: Vec<CatchRow>) {
+        self.catches = catches;
+    }
+    fn set_photos(&mut self, photos: Vec<PhotoRow>) {
+        self.photos = photos;
+    }
+}
+
+impl FullEntry {
+    fn of(entry: JournalEntry) -> Self {
+        Self {
+            entry,
+            catches: vec![],
+            photos: vec![],
+        }
+    }
+}
+
+async fn load_full(db: &PgPool, id: Uuid) -> ApiResult<FullEntry> {
+    let entry = sqlx::query_as::<_, JournalEntry>(&format!(
+        "SELECT {ENTRY_COLUMNS} FROM journal_entries WHERE id = $1"
+    ))
+    .bind(id)
+    .fetch_optional(db)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Journal entry not found.".into()))?;
+
+    let mut one = [FullEntry::of(entry)];
+    hydrate(db, &mut one, |e| e.entry.id).await?;
+    let [full] = one;
+    Ok(full)
+}
+
+/// `GET /api/journal/mine` — every entry the caller has ever written.
 pub async fn list_mine(
     State(state): State<Shared>,
     AuthUser(user): AuthUser,
-) -> ApiResult<Json<Vec<JournalEntry>>> {
+) -> ApiResult<Json<Vec<FullEntry>>> {
     let rows = sqlx::query_as::<_, JournalEntry>(&format!(
         "SELECT {ENTRY_COLUMNS} FROM journal_entries WHERE user_id = $1 ORDER BY created_at DESC"
     ))
     .bind(user.id)
     .fetch_all(&state.db)
     .await?;
-    Ok(Json(rows))
+
+    let mut entries: Vec<FullEntry> = rows.into_iter().map(FullEntry::of).collect();
+    hydrate(&state.db, &mut entries, |e| e.entry.id).await?;
+    Ok(Json(entries))
+}
+
+/// `GET /api/journal/{id}` — one entry, if the caller may see it.
+pub async fn get_one(
+    State(state): State<Shared>,
+    AuthUser(user): AuthUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<FullEntry>> {
+    let full = load_full(&state.db, id).await?;
+    let ctx = ViewerContext::of(&user, full.entry.user_id);
+    if !may_view(
+        ctx,
+        &full.entry.visibility,
+        full.entry.archived_at.is_some(),
+    ) {
+        // Indistinguishable from a genuinely missing entry on purpose: a
+        // family-only story should not be discoverable by id.
+        return Err(AppError::NotFound("Journal entry not found.".into()));
+    }
+    Ok(Json(full))
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -229,29 +532,133 @@ pub async fn eligible_bookings(
     Ok(Json(rows))
 }
 
+/// One catch as submitted from the form. Ids are not accepted: a save
+/// replaces the entry's catch rows wholesale, which is what a repeatable-row
+/// form actually expresses and saves reconciling three-way diffs.
+#[derive(Debug, Deserialize)]
+pub struct CatchInput {
+    pub species_id: Option<Uuid>,
+    pub length_inches: Option<f64>,
+    pub weight_lbs: Option<f64>,
+    pub quantity: Option<i32>,
+    pub notes: Option<String>,
+}
+
+/// A submitted catch after validation — the shape that actually reaches the
+/// database.
+#[derive(Debug, PartialEq)]
+struct CleanCatch {
+    species_id: Option<Uuid>,
+    length_inches: Option<f64>,
+    weight_lbs: Option<f64>,
+    quantity: i32,
+    notes: Option<String>,
+}
+
+fn clean_catches(catches: &[CatchInput]) -> ApiResult<Vec<CleanCatch>> {
+    let mut out = Vec::with_capacity(catches.len());
+    for c in catches {
+        let quantity = c.quantity.unwrap_or(1);
+        if quantity < 1 {
+            return Err(AppError::BadRequest(
+                "A catch needs a quantity of at least 1.".into(),
+            ));
+        }
+        for (label, value) in [("length", c.length_inches), ("weight", c.weight_lbs)] {
+            if let Some(v) = value
+                && (v < 0.0 || !v.is_finite())
+            {
+                return Err(AppError::BadRequest(format!(
+                    "That {label} doesn't look right."
+                )));
+            }
+        }
+        out.push(CleanCatch {
+            species_id: c.species_id,
+            length_inches: c.length_inches,
+            weight_lbs: c.weight_lbs,
+            quantity,
+            notes: c
+                .notes
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+        });
+    }
+    Ok(out)
+}
+
+/// Replaces an entry's catch rows inside the caller's transaction.
+///
+/// Wholesale replacement rather than a row-by-row diff: that is what a
+/// repeatable-row form actually submits, and it keeps `sort_order` honest
+/// without reconciling three versions of the list.
+async fn write_catches(
+    tx: &mut Transaction<'_, Postgres>,
+    entry_id: Uuid,
+    catches: &[CleanCatch],
+) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM journal_catches WHERE journal_entry_id = $1")
+        .bind(entry_id)
+        .execute(&mut **tx)
+        .await?;
+    for (i, c) in catches.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO journal_catches
+                (journal_entry_id, species_id, length_inches, weight_lbs, quantity, notes, sort_order)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(entry_id)
+        .bind(c.species_id)
+        .bind(c.length_inches)
+        .bind(c.weight_lbs)
+        .bind(c.quantity)
+        .bind(&c.notes)
+        .bind(i as i32)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateEntry {
     pub booking_id: Uuid,
     pub title: String,
     pub body: String,
+    /// Omitted means family — the private default, matching the column's.
+    pub visibility: Option<String>,
+    #[serde(default)]
+    pub catches: Vec<CatchInput>,
 }
 
-/// `POST /api/journal`. Eligibility checks the stay has actually *started*
-/// (`check_in <= today`) — whether checkout has happened is irrelevant, a
-/// guest can write about a stay any time after arrival.
+fn require_title_and_body<'a>(title: &'a str, body: &'a str) -> ApiResult<(&'a str, &'a str)> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err(AppError::BadRequest("Title is required.".into()));
+    }
+    let body = body.trim();
+    if body.is_empty() {
+        return Err(AppError::BadRequest("Story can't be empty.".into()));
+    }
+    Ok((title, body))
+}
+
+/// `POST /api/journal` — writes the entry and publishes it in one step.
+///
+/// There is no review: the entry is readable by whoever its `visibility`
+/// admits the moment this returns. Eligibility still checks the stay has
+/// actually *started* (`check_in <= today`).
 pub async fn create(
     State(state): State<Shared>,
     AuthUser(user): AuthUser,
     Json(body): Json<CreateEntry>,
-) -> ApiResult<Json<JournalEntry>> {
-    let title = body.title.trim();
-    if title.is_empty() {
-        return Err(AppError::BadRequest("Title is required.".into()));
-    }
-    let story = body.body.trim();
-    if story.is_empty() {
-        return Err(AppError::BadRequest("Story can't be empty.".into()));
-    }
+) -> ApiResult<Json<FullEntry>> {
+    let (title, story) = require_title_and_body(&body.title, &body.body)?;
+    let visibility = body.visibility.as_deref().unwrap_or(VISIBILITY_FAMILY);
+    validate_visibility(visibility)?;
+    let catches = clean_catches(&body.catches)?;
 
     let booking: Option<(String, NaiveDate, NaiveDate)> = sqlx::query_as(
         "SELECT status, check_in, check_out FROM bookings WHERE id = $1 AND user_id = $2",
@@ -273,26 +680,33 @@ pub async fn create(
             .await?;
     require_no_existing_entry(already)?;
 
+    let mut tx = state.db.begin().await?;
     let entry = sqlx::query_as::<_, JournalEntry>(&format!(
-        "INSERT INTO journal_entries (user_id, booking_id, title, body)
-         VALUES ($1, $2, $3, $4) RETURNING {ENTRY_COLUMNS}"
+        "INSERT INTO journal_entries (user_id, booking_id, title, body, visibility)
+         VALUES ($1, $2, $3, $4, $5) RETURNING {ENTRY_COLUMNS}"
     ))
     .bind(user.id)
     .bind(body.booking_id)
     .bind(title)
     .bind(story)
-    .fetch_one(&state.db)
+    .bind(visibility)
+    .fetch_one(&mut *tx)
     .await?;
+    write_catches(&mut tx, entry.id, &catches).await?;
+    tx.commit().await?;
 
+    // Not a review request any more — the story is already live. It is a
+    // heads-up, which is what after-the-fact moderation actually needs.
     let guest = user.display_name();
     email::spawn_opt(
         state.clone(),
         state.cfg.admin_email.clone(),
-        email_templates::journal_submitted_to_admin(
+        email_templates::journal_posted_to_admin(
             &guest,
             check_in,
             check_out,
             title,
+            visibility,
             app_url(&state),
         ),
     );
@@ -301,69 +715,76 @@ pub async fn create(
             &state.db,
             admin.id,
             "New journal entry",
-            &format!("{guest} submitted a journal entry: \"{title}\"."),
+            &format!("{guest} posted a journal entry: \"{title}\"."),
             Some(body.booking_id),
         )
         .await?;
     }
 
-    Ok(Json(entry))
+    Ok(Json(load_full(&state.db, entry.id).await?))
 }
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateEntry {
     pub title: String,
     pub body: String,
+    pub visibility: Option<String>,
+    #[serde(default)]
+    pub catches: Vec<CatchInput>,
 }
 
-/// `PUT /api/journal/{id}` — owner only, and only while still pending;
-/// once reviewed, the story is locked.
+/// `PUT /api/journal/{id}` — the author editing their own entry, or a
+/// moderator editing anyone's.
+///
+/// One endpoint rather than a separate admin twin: the edit is the same
+/// write either way, and the only thing that differs is who is allowed
+/// through the door. Entries are no longer locked after submission — with
+/// no review to be "past", there is nothing for a lock to protect.
 pub async fn update(
     State(state): State<Shared>,
     AuthUser(user): AuthUser,
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateEntry>,
-) -> ApiResult<Json<JournalEntry>> {
-    let title = body.title.trim();
-    if title.is_empty() {
-        return Err(AppError::BadRequest("Title is required.".into()));
-    }
-    let story = body.body.trim();
-    if story.is_empty() {
-        return Err(AppError::BadRequest("Story can't be empty.".into()));
-    }
+) -> ApiResult<Json<FullEntry>> {
+    let (title, story) = require_title_and_body(&body.title, &body.body)?;
+    let catches = clean_catches(&body.catches)?;
 
     let existing: Option<(Uuid, String)> =
-        sqlx::query_as("SELECT user_id, status FROM journal_entries WHERE id = $1")
+        sqlx::query_as("SELECT user_id, visibility FROM journal_entries WHERE id = $1")
             .bind(id)
             .fetch_optional(&state.db)
             .await?;
-    let Some((owner_id, status)) = existing else {
+    let Some((owner_id, current_visibility)) = existing else {
         return Err(AppError::NotFound("Journal entry not found.".into()));
     };
-    if owner_id != user.id {
+    if owner_id != user.id && !moderates(&user) {
         return Err(AppError::Forbidden("That isn't your journal entry.".into()));
     }
-    if status != "pending" {
-        return Err(AppError::Conflict(
-            "This entry has already been reviewed and can no longer be edited.".into(),
-        ));
-    }
+    let visibility = body.visibility.as_deref().unwrap_or(&current_visibility);
+    validate_visibility(visibility)?;
 
-    let entry = sqlx::query_as::<_, JournalEntry>(&format!(
-        "UPDATE journal_entries SET title = $2, body = $3, updated_at = now()
-         WHERE id = $1 RETURNING {ENTRY_COLUMNS}"
-    ))
+    let mut tx = state.db.begin().await?;
+    sqlx::query(
+        "UPDATE journal_entries SET title = $2, body = $3, visibility = $4, updated_at = now()
+         WHERE id = $1",
+    )
     .bind(id)
     .bind(title)
     .bind(story)
-    .fetch_one(&state.db)
+    .bind(visibility)
+    .execute(&mut *tx)
     .await?;
+    write_catches(&mut tx, id, &catches).await?;
+    tx.commit().await?;
 
-    Ok(Json(entry))
+    Ok(Json(load_full(&state.db, id).await?))
 }
 
-/// `DELETE /api/journal/{id}` — the entry's owner (any status) or an admin.
+/// `DELETE /api/journal/{id}` — the entry's author or a moderator.
+///
+/// Irreversible, and takes the whole memory with it: catches and photo rows
+/// cascade, and every photo file is removed from `UPLOAD_DIR` so nothing is
+/// orphaned on disk.
 pub async fn remove(
     State(state): State<Shared>,
     AuthUser(user): AuthUser,
@@ -377,29 +798,126 @@ pub async fn remove(
     let Some((owner_id,)) = existing else {
         return Err(AppError::NotFound("Journal entry not found.".into()));
     };
-    if owner_id != user.id && !user.is_admin() {
+    if owner_id != user.id && !moderates(&user) {
         return Err(AppError::Forbidden("That isn't your journal entry.".into()));
     }
+
+    // Collected before the delete: once the rows cascade away there is
+    // nothing left to say which files belonged to this entry.
+    let urls: Vec<(String,)> =
+        sqlx::query_as("SELECT url FROM journal_photos WHERE journal_entry_id = $1")
+            .bind(id)
+            .fetch_all(&state.db)
+            .await?;
 
     sqlx::query("DELETE FROM journal_entries WHERE id = $1")
         .bind(id)
         .execute(&state.db)
         .await?;
+
+    for (url,) in &urls {
+        delete_upload_file(&state, url).await;
+    }
+
+    Ok(Json(
+        json!({ "deleted": true, "photos_removed": urls.len() }),
+    ))
+}
+
+// ─────────────────────────── photos ───────────────────────────
+
+/// Loads an entry's author, refusing anyone who may not write to it.
+async fn require_can_edit(state: &Shared, user: &User, entry_id: Uuid) -> ApiResult<()> {
+    let existing: Option<(Uuid,)> =
+        sqlx::query_as("SELECT user_id FROM journal_entries WHERE id = $1")
+            .bind(entry_id)
+            .fetch_optional(&state.db)
+            .await?;
+    let Some((owner_id,)) = existing else {
+        return Err(AppError::NotFound("Journal entry not found.".into()));
+    };
+    if owner_id != user.id && !moderates(user) {
+        return Err(AppError::Forbidden("That isn't your journal entry.".into()));
+    }
+    Ok(())
+}
+
+/// `POST /api/journal/{id}/photos` — multipart, field name `file`, optional
+/// `caption`. The entry's author or a moderator. Same upload plumbing as the
+/// site gallery (see [`crate::uploads`]), so the type and size rules are
+/// identical by construction.
+pub async fn upload_photo(
+    State(state): State<Shared>,
+    AuthUser(user): AuthUser,
+    Path(id): Path<Uuid>,
+    mut multipart: Multipart,
+) -> ApiResult<Json<PhotoRow>> {
+    require_can_edit(&state, &user, id).await?;
+
+    let mut url = None;
+    let mut caption = None;
+    while let Some(field) = multipart.next_field().await.map_err(bad_multipart)? {
+        match field.name() {
+            Some("file") => url = Some(save_upload(&state, field).await?),
+            Some("caption") => {
+                let text = field.text().await.map_err(bad_multipart)?;
+                caption = Some(text).filter(|s: &String| !s.trim().is_empty());
+            }
+            _ => {}
+        }
+    }
+    let url = url.ok_or_else(|| AppError::BadRequest("No file provided.".into()))?;
+
+    let row = sqlx::query_as::<_, PhotoRow>(
+        "INSERT INTO journal_photos (journal_entry_id, url, caption, sort_order)
+         VALUES ($1, $2, $3, COALESCE(
+             (SELECT max(sort_order) + 1 FROM journal_photos WHERE journal_entry_id = $1), 0))
+         RETURNING id, url, caption, sort_order, created_at",
+    )
+    .bind(id)
+    .bind(&url)
+    .bind(caption)
+    .fetch_one(&state.db)
+    .await?;
+
+    Ok(Json(row))
+}
+
+/// `DELETE /api/journal/photos/{photo_id}` — removes the row and the file.
+pub async fn delete_photo(
+    State(state): State<Shared>,
+    AuthUser(user): AuthUser,
+    Path(photo_id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let existing: Option<(Uuid, String)> =
+        sqlx::query_as("SELECT journal_entry_id, url FROM journal_photos WHERE id = $1")
+            .bind(photo_id)
+            .fetch_optional(&state.db)
+            .await?;
+    let Some((entry_id, url)) = existing else {
+        return Err(AppError::NotFound("Photo not found.".into()));
+    };
+    require_can_edit(&state, &user, entry_id).await?;
+
+    sqlx::query("DELETE FROM journal_photos WHERE id = $1")
+        .bind(photo_id)
+        .execute(&state.db)
+        .await?;
+    delete_upload_file(&state, &url).await;
+
     Ok(Json(json!({ "deleted": true })))
 }
 
-// ─────────────────────────── admin ───────────────────────────
+// ─────────────────────────── moderation ───────────────────────────
 
 #[derive(Debug, Serialize, FromRow)]
-pub struct AdminEntry {
+pub struct AdminEntryRow {
     pub id: Uuid,
     pub title: String,
     pub body: String,
-    pub status: String,
-    pub rejected_reason: Option<String>,
+    pub visibility: String,
     pub created_at: DateTime<Utc>,
-    pub approved_at: Option<DateTime<Utc>>,
-    pub approved_by: Option<String>,
+    pub updated_at: DateTime<Utc>,
     pub archived_at: Option<DateTime<Utc>>,
     pub guest_name: Option<String>,
     pub guest_email: String,
@@ -407,207 +925,95 @@ pub struct AdminEntry {
     pub check_out: NaiveDate,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct AdminListQuery {
-    pub status: Option<String>,
+#[derive(Debug, Serialize)]
+pub struct AdminEntry {
+    #[serde(flatten)]
+    pub row: AdminEntryRow,
+    pub catches: Vec<CatchRow>,
+    pub photos: Vec<PhotoRow>,
 }
 
-/// `GET /api/journal/admin` — every entry, filterable by status, pending
-/// first (same "surface what needs attention" ordering as the bookings tab).
+impl Hydratable for AdminEntry {
+    fn set_catches(&mut self, catches: Vec<CatchRow>) {
+        self.catches = catches;
+    }
+    fn set_photos(&mut self, photos: Vec<PhotoRow>) {
+        self.photos = photos;
+    }
+}
+
+/// `GET /api/journal/admin` — every entry, newest first, with the guest's
+/// identity attached. Admin or owner.
+///
+/// Distinct from the feed, which is a reading experience and deliberately
+/// shows only a first name; this is the moderation table.
 pub async fn admin_list(
     State(state): State<Shared>,
-    AdminUser(_): AdminUser,
-    Query(q): Query<AdminListQuery>,
+    AuthUser(user): AuthUser,
 ) -> ApiResult<Json<Vec<AdminEntry>>> {
-    let mut sql = "SELECT je.id, je.title, je.body, je.status, je.rejected_reason,
-                          je.created_at, je.approved_at, je.approved_by, je.archived_at,
-                          u.full_name AS guest_name, u.email AS guest_email,
-                          b.check_in, b.check_out
-                   FROM journal_entries je
-                   JOIN users u ON u.id = je.user_id
-                   JOIN bookings b ON b.id = je.booking_id"
-        .to_string();
-    if q.status.is_some() {
-        sql.push_str(" WHERE je.status = $1");
-    }
-    sql.push_str(" ORDER BY (je.status = 'pending') DESC, je.created_at DESC");
+    require_moderator(&user)?;
 
-    let rows = sqlx::query_as::<_, AdminEntry>(&sql)
-        .bind(q.status.as_deref())
-        .fetch_all(&state.db)
-        .await?;
-    Ok(Json(rows))
-}
-
-#[derive(FromRow)]
-struct EntryWithGuestEmail {
-    #[sqlx(flatten)]
-    entry: JournalEntry,
-    guest_email: String,
-}
-
-async fn load_entry(db: &PgPool, id: Uuid) -> Result<Option<EntryWithGuestEmail>, sqlx::Error> {
-    sqlx::query_as::<_, EntryWithGuestEmail>(&format!(
-        "SELECT {cols}, u.email AS guest_email
-         FROM journal_entries je JOIN users u ON u.id = je.user_id WHERE je.id = $1",
-        cols = ENTRY_COLUMNS
-            .split(", ")
-            .map(|c| format!("je.{c}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    ))
-    .bind(id)
-    .fetch_optional(db)
-    .await
-}
-
-fn require_pending(entry: &JournalEntry) -> ApiResult<()> {
-    if entry.status != "pending" {
-        return Err(AppError::Conflict(format!(
-            "This entry is already {}.",
-            entry.status
-        )));
-    }
-    Ok(())
-}
-
-/// `PUT /api/journal/{id}/approve`.
-pub async fn approve(
-    State(state): State<Shared>,
-    AdminUser(admin): AdminUser,
-    Path(id): Path<Uuid>,
-) -> ApiResult<Json<JournalEntry>> {
-    let row = load_entry(&state.db, id)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Journal entry not found.".into()))?;
-    require_pending(&row.entry)?;
-
-    let entry = sqlx::query_as::<_, JournalEntry>(&format!(
-        "UPDATE journal_entries
-         SET status = 'approved', approved_at = now(), approved_by = $2,
-             rejected_reason = NULL, updated_at = now()
-         WHERE id = $1 RETURNING {ENTRY_COLUMNS}"
-    ))
-    .bind(id)
-    .bind(&admin.email)
-    .fetch_one(&state.db)
-    .await?;
-
-    email::spawn(
-        state.clone(),
-        row.guest_email,
-        email_templates::journal_approved_to_guest(app_url(&state)),
-    );
-    notifications::system_message(
-        &state.db,
-        entry.user_id,
-        "Your story is live!",
-        "Your camp journal entry has been approved and is now posted.",
-        Some(entry.booking_id),
+    let rows = sqlx::query_as::<_, AdminEntryRow>(
+        "SELECT je.id, je.title, je.body, je.visibility, je.created_at, je.updated_at,
+                je.archived_at, u.full_name AS guest_name, u.email AS guest_email,
+                b.check_in, b.check_out
+         FROM journal_entries je
+         JOIN users u ON u.id = je.user_id
+         JOIN bookings b ON b.id = je.booking_id
+         ORDER BY je.created_at DESC",
     )
+    .fetch_all(&state.db)
     .await?;
 
-    Ok(Json(entry))
+    let mut entries: Vec<AdminEntry> = rows
+        .into_iter()
+        .map(|row| AdminEntry {
+            row,
+            catches: vec![],
+            photos: vec![],
+        })
+        .collect();
+    hydrate(&state.db, &mut entries, |e| e.row.id).await?;
+    Ok(Json(entries))
 }
 
-#[derive(Debug, Deserialize)]
-pub struct RejectBody {
-    pub reason: Option<String>,
-}
-
-/// `PUT /api/journal/{id}/reject`.
-pub async fn reject(
-    State(state): State<Shared>,
-    AdminUser(admin): AdminUser,
-    Path(id): Path<Uuid>,
-    Json(body): Json<RejectBody>,
-) -> ApiResult<Json<JournalEntry>> {
-    let row = load_entry(&state.db, id)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Journal entry not found.".into()))?;
-    require_pending(&row.entry)?;
-    let reason = body
-        .reason
-        .as_deref()
-        .map(str::trim)
-        .filter(|r| !r.is_empty());
-
-    let entry = sqlx::query_as::<_, JournalEntry>(&format!(
-        "UPDATE journal_entries
-         SET status = 'rejected', rejected_reason = $2, approved_by = $3,
-             approved_at = NULL, updated_at = now()
-         WHERE id = $1 RETURNING {ENTRY_COLUMNS}"
-    ))
-    .bind(id)
-    .bind(reason)
-    .bind(&admin.email)
-    .fetch_one(&state.db)
-    .await?;
-
-    email::spawn(
-        state.clone(),
-        row.guest_email,
-        email_templates::journal_rejected_to_guest(reason, app_url(&state)),
-    );
-    notifications::system_message(
-        &state.db,
-        entry.user_id,
-        "About your journal entry",
-        &match reason {
-            Some(r) => format!("Your camp journal entry wasn't posted. {r}"),
-            None => "Your camp journal entry wasn't posted. Feel free to submit again!".to_string(),
-        },
-        Some(entry.booking_id),
-    )
-    .await?;
-
-    Ok(Json(entry))
-}
-
-/// `PUT /api/journal/{id}/archive` — admin only. Quiet housekeeping: hides an
-/// approved entry from the public feed without touching `status` or
-/// emailing the guest. Only valid on already-approved entries.
+/// `PUT /api/journal/{id}/archive` — admin or owner. Quiet housekeeping:
+/// hides an entry from everyone but its author and the moderators, without
+/// editing it or emailing anyone.
+///
+/// No longer gated on status (there isn't one) — any entry can be hidden,
+/// which is the point of having a lever short of editing or deleting.
 pub async fn archive(
     State(state): State<Shared>,
-    AdminUser(_admin): AdminUser,
+    AuthUser(user): AuthUser,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<JournalEntry>> {
-    let existing = sqlx::query_as::<_, JournalEntry>(&format!(
-        "SELECT {ENTRY_COLUMNS} FROM journal_entries WHERE id = $1"
-    ))
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Journal entry not found.".into()))?;
-    require_archivable(&existing.status)?;
-
-    let entry = sqlx::query_as::<_, JournalEntry>(&format!(
-        "UPDATE journal_entries SET archived_at = now(), updated_at = now()
-         WHERE id = $1 RETURNING {ENTRY_COLUMNS}"
-    ))
-    .bind(id)
-    .fetch_one(&state.db)
-    .await?;
-
-    Ok(Json(entry))
+    require_moderator(&user)?;
+    set_archived(&state, id, true).await
 }
 
-/// `PUT /api/journal/{id}/unarchive` — admin only. The reverse of
-/// [`archive`]; also silent, no email.
+/// `PUT /api/journal/{id}/unarchive` — the reverse of [`archive`], also
+/// silent.
 pub async fn unarchive(
     State(state): State<Shared>,
-    AdminUser(_admin): AdminUser,
+    AuthUser(user): AuthUser,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<JournalEntry>> {
+    require_moderator(&user)?;
+    set_archived(&state, id, false).await
+}
+
+async fn set_archived(state: &Shared, id: Uuid, archived: bool) -> ApiResult<Json<JournalEntry>> {
     let entry = sqlx::query_as::<_, JournalEntry>(&format!(
-        "UPDATE journal_entries SET archived_at = NULL, updated_at = now()
+        "UPDATE journal_entries
+         SET archived_at = CASE WHEN $2 THEN now() ELSE NULL END, updated_at = now()
          WHERE id = $1 RETURNING {ENTRY_COLUMNS}"
     ))
     .bind(id)
+    .bind(archived)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::NotFound("Journal entry not found.".into()))?;
-
     Ok(Json(entry))
 }
 
@@ -618,6 +1024,8 @@ mod tests {
     fn date(y: i32, m: u32, d: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, d).unwrap()
     }
+
+    // ─────────────── eligibility (unchanged by the rework) ───────────────
 
     #[test]
     fn a_stay_that_has_started_is_eligible_even_without_a_completed_checkout() {
@@ -705,14 +1113,205 @@ mod tests {
         ));
     }
 
+    // ─────────────── visibility ───────────────
+
+    fn viewer(is_author: bool, moderates: bool, is_family: bool) -> ViewerContext {
+        ViewerContext {
+            is_author,
+            moderates,
+            is_family,
+        }
+    }
+
+    const GUEST: ViewerContext = ViewerContext {
+        is_author: false,
+        moderates: false,
+        is_family: false,
+    };
+    const FAMILY: ViewerContext = ViewerContext {
+        is_author: false,
+        moderates: false,
+        is_family: true,
+    };
+    const MODERATOR: ViewerContext = ViewerContext {
+        is_author: false,
+        moderates: true,
+        is_family: false,
+    };
+
     #[test]
-    fn only_an_approved_entry_can_be_archived() {
-        assert!(require_archivable("approved").is_ok());
-        for status in ["pending", "rejected"] {
+    fn a_guest_sees_only_public_entries() {
+        assert!(may_view(GUEST, VISIBILITY_PUBLIC, false));
+        assert!(!may_view(GUEST, VISIBILITY_FAMILY, false));
+    }
+
+    #[test]
+    fn a_family_user_sees_public_and_family_entries() {
+        assert!(may_view(FAMILY, VISIBILITY_PUBLIC, false));
+        assert!(may_view(FAMILY, VISIBILITY_FAMILY, false));
+    }
+
+    #[test]
+    fn a_moderator_sees_everything_including_archived() {
+        for visibility in VISIBILITIES {
+            assert!(may_view(MODERATOR, visibility, false));
+            assert!(may_view(MODERATOR, visibility, true));
+        }
+    }
+
+    /// The author is the one viewer no state hides an entry from — otherwise
+    /// archiving would read to them as their memories having been deleted.
+    #[test]
+    fn an_author_always_sees_their_own_entry() {
+        let author = viewer(true, false, false);
+        for visibility in VISIBILITIES {
+            assert!(may_view(author, visibility, false));
+            assert!(may_view(author, visibility, true));
+        }
+    }
+
+    #[test]
+    fn archiving_hides_an_entry_from_everyone_but_its_author_and_moderators() {
+        assert!(!may_view(GUEST, VISIBILITY_PUBLIC, true));
+        assert!(!may_view(FAMILY, VISIBILITY_PUBLIC, true));
+        assert!(!may_view(FAMILY, VISIBILITY_FAMILY, true));
+        assert!(may_view(MODERATOR, VISIBILITY_FAMILY, true));
+        assert!(may_view(
+            viewer(true, false, false),
+            VISIBILITY_FAMILY,
+            true
+        ));
+    }
+
+    /// An unrecognised visibility fails closed. The CHECK constraint makes
+    /// this unreachable through the database, which is exactly why the code
+    /// should not assume it.
+    #[test]
+    fn an_unknown_visibility_is_visible_to_nobody_but_author_and_moderators() {
+        assert!(!may_view(GUEST, "everyone", false));
+        assert!(!may_view(FAMILY, "everyone", false));
+        assert!(may_view(MODERATOR, "everyone", false));
+    }
+
+    #[test]
+    fn only_the_two_documented_visibilities_validate() {
+        assert!(validate_visibility(VISIBILITY_PUBLIC).is_ok());
+        assert!(validate_visibility(VISIBILITY_FAMILY).is_ok());
+        for bad in ["", "everyone", "private", "approved"] {
+            assert!(
+                matches!(validate_visibility(bad), Err(AppError::BadRequest(_))),
+                "{bad} should not validate"
+            );
+        }
+    }
+
+    /// The SQL in [`feed_where_clause`] is the twin of [`may_view`]; if one
+    /// grows a branch the other doesn't, this is the reminder.
+    #[test]
+    fn the_feed_sql_mentions_every_term_the_rule_turns_on() {
+        let sql = feed_where_clause();
+        assert!(sql.contains("je.user_id = $1"), "author bypass missing");
+        assert!(sql.contains("$2"), "moderator bypass missing");
+        assert!(
+            sql.contains("archived_at IS NULL"),
+            "archive filter missing"
+        );
+        assert!(sql.contains("visibility = 'public'"), "public tier missing");
+        assert!(
+            sql.contains("$3 AND je.visibility = 'family'"),
+            "family tier missing"
+        );
+    }
+
+    // ─────────────── catch input ───────────────
+
+    #[test]
+    fn a_catch_defaults_to_a_quantity_of_one() {
+        let cleaned = clean_catches(&[CatchInput {
+            species_id: None,
+            length_inches: None,
+            weight_lbs: None,
+            quantity: None,
+            notes: None,
+        }])
+        .unwrap();
+        assert_eq!(cleaned[0].quantity, 1);
+    }
+
+    #[test]
+    fn a_catch_quantity_below_one_is_rejected() {
+        for quantity in [0, -3] {
             assert!(matches!(
-                require_archivable(status),
-                Err(AppError::Conflict(_))
+                clean_catches(&[CatchInput {
+                    species_id: None,
+                    length_inches: None,
+                    weight_lbs: None,
+                    quantity: Some(quantity),
+                    notes: None,
+                }]),
+                Err(AppError::BadRequest(_))
             ));
         }
+    }
+
+    #[test]
+    fn negative_and_non_finite_measurements_are_rejected() {
+        for bad in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(
+                matches!(
+                    clean_catches(&[CatchInput {
+                        species_id: None,
+                        length_inches: Some(bad),
+                        weight_lbs: None,
+                        quantity: None,
+                        notes: None,
+                    }]),
+                    Err(AppError::BadRequest(_))
+                ),
+                "length {bad} should be rejected"
+            );
+            assert!(
+                matches!(
+                    clean_catches(&[CatchInput {
+                        species_id: None,
+                        length_inches: None,
+                        weight_lbs: Some(bad),
+                        quantity: None,
+                        notes: None,
+                    }]),
+                    Err(AppError::BadRequest(_))
+                ),
+                "weight {bad} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn blank_catch_notes_are_stored_as_nothing_at_all() {
+        let cleaned = clean_catches(&[CatchInput {
+            species_id: None,
+            length_inches: None,
+            weight_lbs: None,
+            quantity: Some(2),
+            notes: Some("   ".into()),
+        }])
+        .unwrap();
+        assert_eq!(cleaned[0].notes, None);
+    }
+
+    #[test]
+    fn a_title_or_story_of_only_whitespace_is_refused() {
+        assert!(matches!(
+            require_title_and_body("   ", "a story"),
+            Err(AppError::BadRequest(_))
+        ));
+        assert!(matches!(
+            require_title_and_body("a title", "\n\t "),
+            Err(AppError::BadRequest(_))
+        ));
+        assert_eq!(
+            require_title_and_body("  a title  ", "  a story  ").unwrap(),
+            ("a title", "a story")
+        );
     }
 }

@@ -1,6 +1,6 @@
 import { Link } from 'react-router-dom';
 import { BookOpen, ClipboardCheck, ExternalLink, Images, KeyRound, Tent, Users } from 'lucide-react';
-import { Button, Card, EmptyState, JournalStatusBadge, PageHeader, Spinner } from '../components/ui';
+import { Button, Card, EmptyState, JournalVisibilityBadge, PageHeader, Spinner } from '../components/ui';
 import { useCheckinInfo, useGuestPhotosLink, useMyStay } from '../lib/queries';
 import { formatRange, nightCount, pluralNights } from '../lib/dates';
 
@@ -95,7 +95,7 @@ export default function MyStay() {
           {Boolean(stay.guest_count_kids) && `, ${stay.guest_count_kids} kids`}
         </p>
 
-        {(stay.checkout_eligible || stay.journal_eligible || stay.journal_status) && (
+        {(stay.checkout_eligible || stay.journal_eligible || stay.journal_visibility) && (
           <div className="mt-4 flex flex-wrap items-center gap-2">
             {stay.checkout_eligible && (
               <Link to="/checkout">
@@ -111,7 +111,9 @@ export default function MyStay() {
                 </Button>
               </Link>
             )}
-            {stay.journal_status && <JournalStatusBadge status={stay.journal_status} />}
+            {stay.journal_visibility && (
+              <JournalVisibilityBadge visibility={stay.journal_visibility} />
+            )}
           </div>
         )}
       </Card>

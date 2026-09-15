@@ -27,14 +27,15 @@ pub struct MyStay {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub checkout_eligible: Option<bool>,
     /// Whether `/journal/new` should be offered for this booking — see
-    /// [`journal::is_journal_eligible`]. `false` whenever `journal_status`
+    /// [`journal::is_journal_eligible`]. `false` whenever `journal_visibility`
     /// is already set, since an existing entry is shown as a badge instead.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub journal_eligible: Option<bool>,
-    /// Set once an entry exists for this booking, so the frontend can show
-    /// a status badge in place of the "Share your story" button.
+    /// Who the author chose to show their entry to, set once one exists —
+    /// so the frontend can show a badge and an edit link in place of the
+    /// "Share your story" button.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub journal_status: Option<String>,
+    pub journal_visibility: Option<String>,
 }
 
 impl MyStay {
@@ -49,7 +50,7 @@ impl MyStay {
             checked_out: None,
             checkout_eligible: None,
             journal_eligible: None,
-            journal_status: None,
+            journal_visibility: None,
         }
     }
 }
@@ -111,17 +112,17 @@ pub async fn my_stay(
             .bind(booking_id)
             .fetch_one(&state.db)
             .await?;
-    let journal_status: Option<(String,)> =
-        sqlx::query_as("SELECT status FROM journal_entries WHERE booking_id = $1")
+    let journal_visibility: Option<(String,)> =
+        sqlx::query_as("SELECT visibility FROM journal_entries WHERE booking_id = $1")
             .bind(booking_id)
             .fetch_optional(&state.db)
             .await?;
-    let journal_status = journal_status.map(|(s,)| s);
+    let journal_visibility = journal_visibility.map(|(s,)| s);
 
     let checkout_eligible =
         checkout::is_checkout_eligible("approved", check_out, today, checked_out);
     let journal_eligible =
-        journal::is_journal_eligible("approved", check_in, today, journal_status.is_some());
+        journal::is_journal_eligible("approved", check_in, today, journal_visibility.is_some());
 
     Ok(Json(MyStay {
         has_stay: true,
@@ -133,7 +134,7 @@ pub async fn my_stay(
         checked_out: Some(checked_out),
         checkout_eligible: Some(checkout_eligible),
         journal_eligible: Some(journal_eligible),
-        journal_status,
+        journal_visibility,
     }))
 }
 
