@@ -63,9 +63,10 @@ struct BookingRow {
     /// Whether `crate::checkout` has a completed record for this booking.
     checked_out: bool,
     checkout_notes: Option<String>,
-    /// Present once a `crate::journal` entry exists for this booking.
+    /// Present once a `crate::journal` entry exists for this booking —
+    /// the id, and who the author chose to show it to.
     journal_id: Option<Uuid>,
-    journal_status: Option<String>,
+    journal_visibility: Option<String>,
 }
 
 /// What a given caller is allowed to see about a booking.
@@ -137,7 +138,7 @@ pub struct BookingView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub journal_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub journal_status: Option<String>,
+    pub journal_visibility: Option<String>,
     /// The booker's own privacy setting, for the surfaces that let them
     /// change it (`/my-bookings`). Same `full` visibility as the rest — this
     /// is a preference, and only the people who can already see the booking's
@@ -226,7 +227,7 @@ impl BookingRow {
             checked_out: full.then_some(self.checked_out),
             checkout_notes: full.then(|| self.checkout_notes.clone()).flatten(),
             journal_id: full.then_some(self.journal_id).flatten(),
-            journal_status: full.then(|| self.journal_status.clone()).flatten(),
+            journal_visibility: full.then(|| self.journal_visibility.clone()).flatten(),
             is_private: full.then_some(b.is_private),
             // `users::first_name` and not `guest_name`: the journal feed
             // already settled how a guest is named to other people, and a
@@ -242,7 +243,7 @@ fn select_rows() -> String {
     format!(
         "SELECT {}, u.full_name AS guest_name, u.email AS guest_email, \
                 (bc.id IS NOT NULL) AS checked_out, bc.notes AS checkout_notes, \
-                je.id AS journal_id, je.status AS journal_status
+                je.id AS journal_id, je.visibility AS journal_visibility
          FROM bookings b
          JOIN users u ON u.id = b.user_id
          LEFT JOIN booking_checkouts bc ON bc.booking_id = b.id
@@ -709,7 +710,7 @@ pub async fn create_booking_for(
         checked_out: false,
         checkout_notes: None,
         journal_id: None,
-        journal_status: None,
+        journal_visibility: None,
     };
 
     Ok(BookingWriteResponse {

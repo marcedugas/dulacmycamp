@@ -4,15 +4,21 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { BookOpen, Send, Tent } from 'lucide-react';
 import { Button, Card, EmptyState, Field, Input, PageHeader, Spinner, Textarea } from '../components/ui';
+import { CatchLog, toCatchInputs } from '../components/CatchLog';
+import { JournalPhotos } from '../components/JournalPhotos';
+import { JournalVisibilityChoice } from '../components/JournalVisibility';
 import { api, ApiError } from '../lib/api';
 import { useJournalEligibleBookings, useJournalMine } from '../lib/queries';
 import { formatRange } from '../lib/dates';
-import type { JournalEntry } from '../lib/types';
+import type { JournalCatchInput, JournalEntry, JournalVisibility } from '../lib/types';
 
 /**
- * Doubles as the "new story" form (?booking_id=) and the "edit my pending
- * story" form (?entry_id=, reached from My Bookings) — same fields, same
- * card, just POST vs PUT under the hood.
+ * Doubles as the "new story" form (?booking_id=) and the "edit my story"
+ * form (?entry_id=) — same fields, same card, just POST vs PUT underneath.
+ *
+ * Editing is no longer time-limited. With the review queue gone there is no
+ * "already reviewed" state for a lock to protect, so an author can keep
+ * adding to a stay's memory log as long as they like.
  */
 export default function JournalNew() {
   const [params] = useSearchParams();
@@ -29,15 +35,21 @@ export default function JournalNew() {
   const [pickedId, setPickedId] = useState<string | null>(fromQuery);
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
+  // Family by default — the private option, matching the column default and
+  // the reservation privacy toggle's philosophy.
+  const [visibility, setVisibility] = useState<JournalVisibility>('family');
+  const [catches, setCatches] = useState<JournalCatchInput[]>([]);
   const [seeded, setSeeded] = useState(false);
-  const [submitted, setSubmitted] = useState(false);
+  const [created, setCreated] = useState<JournalEntry | null>(null);
 
   // Seed the form from the entry being edited, once — without this guard a
-  // background refetch would clobber whatever the guest is mid-typing.
+  // background refetch would clobber whatever the author is mid-typing.
   useEffect(() => {
     if (editing && !seeded) {
       setTitle(editing.title);
       setBody(editing.body);
+      setVisibility(editing.visibility);
+      setCatches(toCatchInputs(editing.catches));
       setSeeded(true);
     }
   }, [editing, seeded]);
@@ -48,32 +60,68 @@ export default function JournalNew() {
   const bookingId = pickedId ?? (eligible.length === 1 ? eligible[0].booking_id : null);
   const chosen = bookingId ? eligible.find((b) => b.booking_id === bookingId) : undefined;
 
+  const invalidate = () => {
+    void queryClient.invalidateQueries({ queryKey: ['journal-mine'] });
+    void queryClient.invalidateQueries({ queryKey: ['journal-feed'], exact: false });
+    void queryClient.invalidateQueries({ queryKey: ['journal-eligible-bookings'] });
+    void queryClient.invalidateQueries({ queryKey: ['my-stay'] });
+    void queryClient.invalidateQueries({ queryKey: ['bookings'] });
+  };
+
+  const payload = () => ({
+    title: title.trim(),
+    body: body.trim(),
+    visibility,
+    catches: catches.map((c) => ({ ...c, notes: c.notes?.trim() || null })),
+  });
+
   const create = useMutation({
     mutationFn: () =>
       api<JournalEntry>('/journal', {
         method: 'POST',
-        body: { booking_id: bookingId, title: title.trim(), body: body.trim() },
+        body: { booking_id: bookingId, ...payload() },
       }),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['journal-mine'] });
-      void queryClient.invalidateQueries({ queryKey: ['journal-eligible-bookings'] });
-      setSubmitted(true);
+    onSuccess: (entry) => {
+      invalidate();
+      // Straight to the photo step: the entry is already live, so there is
+      // nothing to "finish submitting" — only more to add if they want.
+      setCreated(entry);
     },
-    onError: (err) => toast.error(err instanceof ApiError ? err.message : 'Could not submit your story.'),
+    onError: (err) => toast.error(err instanceof ApiError ? err.message : 'Could not post your story.'),
   });
 
   const save = useMutation({
-    mutationFn: () =>
-      api<JournalEntry>(`/journal/${entryId}`, {
-        method: 'PUT',
-        body: { title: title.trim(), body: body.trim() },
-      }),
+    mutationFn: () => api<JournalEntry>(`/journal/${entryId}`, { method: 'PUT', body: payload() }),
     onSuccess: () => {
       toast.success('Story updated.');
-      void queryClient.invalidateQueries({ queryKey: ['journal-mine'] });
+      invalidate();
     },
     onError: (err) => toast.error(err instanceof ApiError ? err.message : 'Could not save your changes.'),
   });
+
+  const storyFields = (
+    <>
+      <Field label="Title">
+        <Input
+          required
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          placeholder="Redfish on the falling tide"
+        />
+      </Field>
+      <Field label="Story">
+        <Textarea
+          required
+          rows={9}
+          value={body}
+          onChange={(e) => setBody(e.target.value)}
+          placeholder="Tell us about your stay…"
+        />
+      </Field>
+      <CatchLog catches={catches} onChange={setCatches} />
+      <JournalVisibilityChoice value={visibility} onChange={setVisibility} />
+    </>
+  );
 
   // ── edit mode ──
   if (entryId) {
@@ -93,20 +141,9 @@ export default function JournalNew() {
         </div>
       );
     }
-    if (editing.status !== 'pending') {
-      return (
-        <div className="mx-auto max-w-2xl px-4 py-10">
-          <PageHeader title="Edit story" />
-          <EmptyState
-            title="This story has already been reviewed"
-            hint="Once a story is approved or not posted, it can no longer be edited."
-          />
-        </div>
-      );
-    }
     return (
       <div className="mx-auto max-w-2xl px-4 py-10">
-        <PageHeader title="Edit your story" subtitle="Only editable while your story is still pending review." />
+        <PageHeader title="Edit your story" subtitle="Changes go live straight away." />
         <Card>
           <form
             className="space-y-4"
@@ -115,16 +152,11 @@ export default function JournalNew() {
               save.mutate();
             }}
           >
-            <Field label="Title">
-              <Input required value={title} onChange={(e) => setTitle(e.target.value)} />
-            </Field>
-            <Field label="Story">
-              <Textarea required rows={10} value={body} onChange={(e) => setBody(e.target.value)} />
-            </Field>
+            {storyFields}
             <div className="flex justify-end gap-2">
-              <Link to="/my-bookings">
+              <Link to="/journal">
                 <Button type="button" variant="ghost">
-                  Cancel
+                  Done
                 </Button>
               </Link>
               <Button type="submit" size="lg" disabled={save.isPending}>
@@ -133,6 +165,15 @@ export default function JournalNew() {
             </div>
           </form>
         </Card>
+
+        <div className="mt-4">
+          <JournalPhotos
+            entryId={editing.id}
+            photos={editing.photos}
+            editable
+            onChanged={invalidate}
+          />
+        </div>
       </div>
     );
   }
@@ -146,11 +187,26 @@ export default function JournalNew() {
         <div className="flex justify-center py-20">
           <Spinner />
         </div>
-      ) : submitted ? (
-        <Card className="text-center">
-          <BookOpen className="mx-auto mb-3 text-forest-600" size={30} />
-          <h3 className="font-display text-xl font-bold text-charcoal">Thanks for sharing!</h3>
-          <p className="mt-2 text-muted">Your story will be posted once it's reviewed.</p>
+      ) : created ? (
+        <>
+          <Card className="text-center">
+            <BookOpen className="mx-auto mb-3 text-forest-600" size={30} />
+            <h3 className="font-display text-xl font-bold text-charcoal">Your story is posted!</h3>
+            <p className="mt-2 text-muted">
+              It's live in the camp journal now — add some photos below if you'd like, or come back
+              and edit it any time.
+            </p>
+          </Card>
+
+          <div className="mt-4">
+            <JournalPhotos
+              entryId={created.id}
+              photos={(mineQuery.data ?? []).find((e) => e.id === created.id)?.photos ?? []}
+              editable
+              onChanged={invalidate}
+            />
+          </div>
+
           <div className="mt-5 flex justify-center gap-3">
             <Link to="/my-bookings">
               <Button variant="ghost">My Bookings</Button>
@@ -159,12 +215,12 @@ export default function JournalNew() {
               <Button>Read the journal</Button>
             </Link>
           </div>
-        </Card>
+        </>
       ) : eligible.length === 0 ? (
         <EmptyState
           icon={<Tent size={26} />}
-          title="You'll be able to share a story after your stay!"
-          hint="Complete checkout for a stay and you can journal about it here."
+          title="You'll be able to share a story after your stay starts!"
+          hint="Once you've checked in, you can journal about that stay here."
         />
       ) : !chosen ? (
         <Card>
@@ -197,26 +253,10 @@ export default function JournalNew() {
               create.mutate();
             }}
           >
-            <Field label="Title">
-              <Input
-                required
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                placeholder="Redfish on the falling tide"
-              />
-            </Field>
-            <Field label="Story">
-              <Textarea
-                required
-                rows={10}
-                value={body}
-                onChange={(e) => setBody(e.target.value)}
-                placeholder="Tell us about your stay…"
-              />
-            </Field>
+            {storyFields}
             <div className="flex justify-end">
               <Button type="submit" size="lg" disabled={create.isPending}>
-                <Send size={16} /> {create.isPending ? 'Submitting…' : 'Submit Story'}
+                <Send size={16} /> {create.isPending ? 'Posting…' : 'Post Story'}
               </Button>
             </div>
           </form>

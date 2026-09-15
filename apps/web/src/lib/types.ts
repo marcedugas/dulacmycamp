@@ -83,7 +83,6 @@ export interface UserWithStats extends User {
  * present for the booking's owner and for admins — the public calendar shows
  * that the camp is taken, never by whom.
  */
-export type JournalStatus = 'pending' | 'approved' | 'rejected';
 
 export interface Booking {
   id: string;
@@ -112,7 +111,7 @@ export interface Booking {
   checked_out?: boolean;
   checkout_notes?: string;
   journal_id?: string;
-  journal_status?: JournalStatus;
+  journal_visibility?: JournalVisibility;
   /** The booker's own visibility preference — true keeps their name off other
    *  people's calendars. Same visibility as guest_name etc.: present for the
    *  booking's owner and admins, which is everyone who can change it. */
@@ -319,40 +318,85 @@ export interface AdminCheckout {
 
 // ── camp journal ──
 
-/** A journal entry as its own author sees it — any status. */
+/**
+ * Who an entry is shown to. There is no open-internet tier: the feed itself
+ * requires a login, so "public" means any registered account.
+ */
+export type JournalVisibility = 'public' | 'family';
+
+/** One logged catch. Every measurement is optional. */
+export interface JournalCatch {
+  id: string;
+  species_id: string | null;
+  /** Resolved from the species list, so a rename reads through everywhere. */
+  species_name: string | null;
+  length_inches: number | null;
+  weight_lbs: number | null;
+  quantity: number;
+  notes: string | null;
+  sort_order: number;
+}
+
+/** A catch as submitted — no id, since a save replaces the whole list. */
+export interface JournalCatchInput {
+  species_id: string | null;
+  length_inches: number | null;
+  weight_lbs: number | null;
+  quantity: number;
+  notes: string | null;
+}
+
+export interface JournalPhoto {
+  id: string;
+  url: string;
+  caption: string | null;
+  sort_order: number;
+  created_at: string;
+}
+
+/** An entry as its own author (or a moderator) works on it. */
 export interface JournalEntry {
   id: string;
   user_id: string;
   booking_id: string;
   title: string;
   body: string;
-  status: JournalStatus;
-  rejected_reason: string | null;
-  approved_at: string | null;
-  approved_by: string | null;
+  visibility: JournalVisibility;
+  /** Set when a moderator has hidden this entry. Independent of visibility. */
   archived_at: string | null;
   created_at: string;
   updated_at: string;
+  catches: JournalCatch[];
+  photos: JournalPhoto[];
 }
 
-/** An approved entry as it appears on the public feed — no guest email, no ratings. */
-export interface PublicJournalEntry {
+/** An entry as it appears on the feed — a first name only, never an email. */
+export interface FeedJournalEntry {
   id: string;
   title: string;
   body: string;
+  visibility: JournalVisibility;
+  archived_at: string | null;
   created_at: string;
-  approved_at: string | null;
+  updated_at: string;
   guest_first_name: string;
   check_in: string;
   check_out: string;
+  /** The reader wrote this one — worth labelling, and offering an edit link. */
+  is_mine: boolean;
+  catches: JournalCatch[];
+  photos: JournalPhoto[];
 }
 
-export interface PublicJournalPage {
-  entries: PublicJournalEntry[];
+export interface JournalFeedPage {
+  entries: FeedJournalEntry[];
   page: number;
   page_size: number;
   total: number;
   total_pages: number;
+  /** True when the reader is an admin or the owner, so the page can say that
+   *  it is showing hidden and family-only entries it would otherwise omit. */
+  moderator: boolean;
 }
 
 export interface JournalEligibleBooking {
@@ -361,21 +405,31 @@ export interface JournalEligibleBooking {
   check_out: string;
 }
 
+/** The moderation table's row — the only journal shape carrying an email. */
 export interface AdminJournalEntry {
   id: string;
   title: string;
   body: string;
-  status: JournalStatus;
-  rejected_reason: string | null;
+  visibility: JournalVisibility;
   created_at: string;
-  approved_at: string | null;
-  approved_by: string | null;
-  /** Set when an admin has hidden this entry from the public feed; independent of status. */
+  updated_at: string;
   archived_at: string | null;
   guest_name: string | null;
   guest_email: string;
   check_in: string;
   check_out: string;
+  catches: JournalCatch[];
+  photos: JournalPhoto[];
+}
+
+/** The admin-managed species list behind the catch log's dropdown. */
+export interface FishSpecies {
+  id: string;
+  name: string;
+  sort_order: number;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
 }
 
 // ── check-in info / my stay ──
@@ -410,10 +464,10 @@ export interface MyStay {
   guest_count_kids?: number;
   checked_out?: boolean;
   checkout_eligible?: boolean;
-  /** Whether "/journal/new" should be offered — false once journal_status is set. */
+  /** Whether "/journal/new" should be offered — false once an entry exists. */
   journal_eligible?: boolean;
-  /** Set once an entry exists for this booking; show a status badge instead of the button. */
-  journal_status?: JournalStatus;
+  /** Who the author showed their entry to; set once one exists. */
+  journal_visibility?: JournalVisibility;
 }
 
 export interface Message {

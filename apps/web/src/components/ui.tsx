@@ -2,7 +2,7 @@ import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode, TextareaHTML
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
-import type { BookingStatus, JournalStatus } from '../lib/types';
+import type { BookingStatus, JournalVisibility } from '../lib/types';
 
 export function cx(...parts: (string | false | null | undefined)[]): string {
   return parts.filter(Boolean).join(' ');
@@ -230,17 +230,36 @@ export function StatusBadge({ status }: { status: BookingStatus }) {
   );
 }
 
-const JOURNAL_STATUS: Record<JournalStatus, { label: string; className: string }> = {
-  pending: { label: 'Pending review', className: 'border-amber-300 bg-amber-100 text-amber-900' },
-  approved: { label: 'Published', className: 'border-forest-300 bg-forest-100 text-forest-800' },
-  rejected: { label: 'Not published', className: 'border-sand bg-cream-dark text-muted' },
+const JOURNAL_VISIBILITY: Record<JournalVisibility, { label: string; className: string }> = {
+  public: { label: 'Everyone', className: 'border-forest-300 bg-forest-100 text-forest-800' },
+  family: { label: 'Family only', className: 'border-bayou-300 bg-bayou-100 text-bayou-800' },
 };
 
-/** Same badge shape as {@link StatusBadge}, for a journal entry's review status. */
-export function JournalStatusBadge({ status }: { status: JournalStatus }) {
-  const { label, className } = JOURNAL_STATUS[status];
+/**
+ * Same badge shape as {@link StatusBadge}, for who a journal entry reaches.
+ *
+ * Entries publish themselves now, so there is no review state to report —
+ * the question a badge can usefully answer is who can read it. `archived`
+ * overrides the visibility, because a hidden entry reaches nobody whatever
+ * it says.
+ */
+export function JournalVisibilityBadge({
+  visibility,
+  archived = false,
+}: {
+  visibility: JournalVisibility;
+  archived?: boolean;
+}) {
+  const { label, className } = archived
+    ? { label: 'Hidden', className: 'border-sand bg-cream-dark text-muted' }
+    : JOURNAL_VISIBILITY[visibility];
   return (
-    <span className={cx('rounded-full border px-2.5 py-0.5 text-xs font-semibold', className)}>
+    <span
+      className={cx(
+        'inline-block whitespace-nowrap rounded-full border px-2.5 py-0.5 text-xs font-semibold',
+        className,
+      )}
+    >
       {label}
     </span>
   );

@@ -518,16 +518,30 @@ pub fn checkout_notes_to_admin(
     (subject, layout("Checkout note", &body, &actions), text)
 }
 
-/// Informational — no one-click buttons, unlike booking approval. The admin
-/// should read the story before deciding, not act blind from an email.
-pub fn journal_submitted_to_admin(
+/// A heads-up that a story went live, not a request to review one.
+///
+/// Journal entries self-publish, so by the time this lands the story is
+/// already readable by whoever its visibility admits. The button goes to the
+/// admin panel because that is where the after-the-fact levers are — edit,
+/// archive, delete — not because anything is waiting on a decision.
+///
+/// The old `journal_approved_to_guest` / `journal_rejected_to_guest` pair
+/// retired with the approval queue: there is no longer an approval to
+/// announce, and nothing rejects an entry on the way in.
+pub fn journal_posted_to_admin(
     guest: &str,
     check_in: chrono::NaiveDate,
     check_out: chrono::NaiveDate,
     title: &str,
+    visibility: &str,
     app_url: &str,
 ) -> Email {
-    let subject = format!("{guest} submitted a journal entry");
+    let subject = format!("{guest} posted a journal entry");
+    let audience = if visibility == "public" {
+        "Any registered account"
+    } else {
+        "Family only"
+    };
     let mut rows = String::new();
     rows.push_str(&row("Guest", &esc(guest)));
     rows.push_str(&row(
@@ -535,58 +549,20 @@ pub fn journal_submitted_to_admin(
         &format!("{} &rarr; {}", pretty(check_in), pretty(check_out)),
     ));
     rows.push_str(&row("Title", &esc(title)));
+    rows.push_str(&row("Visible to", audience));
     let body = format!(
-        r#"<p style="margin:0 0 14px;">A new camp journal story is waiting for review.</p><table role="presentation" cellpadding="0" cellspacing="0" style="margin:6px 0 4px;">{rows}</table>"#
+        r#"<p style="margin:0 0 14px;">A new camp journal story is live.</p><table role="presentation" cellpadding="0" cellspacing="0" style="margin:6px 0 4px;">{rows}</table>"#
     );
     let actions = format!(
         r#"<table role="presentation" cellpadding="0" cellspacing="0" style="margin:22px 0 4px;"><tr>{}</tr></table>"#,
-        button("Review in admin panel", &format!("{app_url}/admin"), BROWN)
+        button("Open the admin panel", &format!("{app_url}/admin"), BROWN)
     );
     let text = format!(
-        "{guest} submitted a journal entry\n\nGuest: {guest}\nStay: {} - {}\nTitle: {title}\n\n{app_url}/admin\n",
+        "{guest} posted a journal entry\n\nGuest: {guest}\nStay: {} - {}\nTitle: {title}\nVisible to: {audience}\n\n{app_url}/admin\n",
         pretty(check_in),
         pretty(check_out),
     );
     (subject, layout("New journal entry", &body, &actions), text)
-}
-
-pub fn journal_approved_to_guest(app_url: &str) -> Email {
-    let subject = "Your journal entry is live! 📖".to_string();
-    let body = r#"<p style="margin:0 0 14px;">Your story from your stay at Dulac My Camp is now posted in the camp journal.</p>"#.to_string();
-    let actions = format!(
-        r#"<table role="presentation" cellpadding="0" cellspacing="0" style="margin:22px 0 4px;"><tr>{}</tr></table>"#,
-        button("View journal", &format!("{app_url}/journal"), GREEN)
-    );
-    let text = format!(
-        "Your journal entry is live!\n\nYour story from your stay at Dulac My Camp is now posted in the camp journal.\n\n{app_url}/journal\n"
-    );
-    (subject, layout("Story posted", &body, &actions), text)
-}
-
-/// Deliberately warm, not bureaucratic — this is a private camp, not a
-/// moderated public forum.
-pub fn journal_rejected_to_guest(reason: Option<&str>, app_url: &str) -> Email {
-    let subject = "About your journal entry".to_string();
-    let reason_line = reason
-        .filter(|r| !r.trim().is_empty())
-        .map(|r| format!(" {}", esc(r)))
-        .unwrap_or_default();
-    let body = format!(
-        r#"<p style="margin:0 0 14px;">Thanks for sharing your story from the camp. We didn't post this one.{reason_line}</p>
-<p style="margin:0;">Feel free to submit again!</p>"#
-    );
-    let actions = format!(
-        r#"<table role="presentation" cellpadding="0" cellspacing="0" style="margin:22px 0 4px;"><tr>{}</tr></table>"#,
-        button("My bookings", &format!("{app_url}/my-bookings"), GREEN)
-    );
-    let text = format!(
-        "About your journal entry\n\nThanks for sharing your story from the camp. We didn't post this one.{}\n\nFeel free to submit again!\n{app_url}/my-bookings\n",
-        reason
-            .filter(|r| !r.trim().is_empty())
-            .map(|r| format!(" {r}"))
-            .unwrap_or_default(),
-    );
-    (subject, layout("About your story", &body, &actions), text)
 }
 
 /// The optional-reason form shown by `GET /api/bookings/deny/{token}`.

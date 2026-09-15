@@ -1,54 +1,76 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { format } from 'date-fns';
 import { toast } from 'sonner';
-import { Archive, ArchiveRestore, Check, X } from 'lucide-react';
-import { Button, EmptyState, Modal, Spinner, Textarea, cx } from '../../components/ui';
+import { Archive, ArchiveRestore, Pencil, Trash2, TriangleAlert } from 'lucide-react';
+import {
+  Button,
+  EmptyState,
+  Field,
+  Input,
+  JournalVisibilityBadge,
+  Modal,
+  Spinner,
+  Textarea,
+  cx,
+} from '../../components/ui';
+import { CatchLog, CatchSummary, toCatchInputs } from '../../components/CatchLog';
+import { JournalPhotos } from '../../components/JournalPhotos';
+import { JournalVisibilityChoice } from '../../components/JournalVisibility';
 import { api, ApiError } from '../../lib/api';
 import { useJournalAdmin } from '../../lib/queries';
 import { formatRange } from '../../lib/dates';
-import type { AdminJournalEntry, JournalStatus } from '../../lib/types';
+import type { AdminJournalEntry, JournalCatchInput, JournalVisibility } from '../../lib/types';
 
-const STATUSES: (JournalStatus | 'all')[] = ['all', 'pending', 'approved', 'rejected'];
+const onError = (err: unknown) =>
+  toast.error(err instanceof ApiError ? err.message : 'That action failed.');
 
-const STATUS_STYLES: Record<JournalStatus, string> = {
-  pending: 'bg-amber-100 text-amber-900 border-amber-300',
-  approved: 'bg-forest-100 text-forest-800 border-forest-300',
-  rejected: 'bg-cream-dark text-muted border-sand',
-};
-
+/**
+ * After-the-fact moderation, which is all there is now — entries publish
+ * themselves, so nothing here is a gate. Three levers, escalating: edit the
+ * content, hide it (archive, reversible), or delete it outright.
+ */
 export default function JournalTab() {
-  const [status, setStatus] = useState<JournalStatus | 'all'>('all');
-  const { data, isLoading } = useJournalAdmin(status === 'all' ? undefined : status);
+  const { data, isLoading } = useJournalAdmin();
   const queryClient = useQueryClient();
 
-  const [reviewing, setReviewing] = useState<AdminJournalEntry | null>(null);
-  const [rejecting, setRejecting] = useState<AdminJournalEntry | null>(null);
-  const [reason, setReason] = useState('');
+  const [editing, setEditing] = useState<AdminJournalEntry | null>(null);
+  const [deleting, setDeleting] = useState<AdminJournalEntry | null>(null);
 
-  const invalidate = () =>
-    void queryClient.invalidateQueries({ queryKey: ['journal-admin'], exact: false });
-  const onError = (err: unknown) =>
-    toast.error(err instanceof ApiError ? err.message : 'That action failed.');
+  const [title, setTitle] = useState('');
+  const [body, setBody] = useState('');
+  const [visibility, setVisibility] = useState<JournalVisibility>('family');
+  const [catches, setCatches] = useState<JournalCatchInput[]>([]);
 
-  const approve = useMutation({
-    mutationFn: (id: string) => api(`/journal/${id}/approve`, { method: 'PUT' }),
+  // Seed the editor whenever a different entry is opened.
+  useEffect(() => {
+    if (!editing) return;
+    setTitle(editing.title);
+    setBody(editing.body);
+    setVisibility(editing.visibility);
+    setCatches(toCatchInputs(editing.catches));
+  }, [editing]);
+
+  const invalidate = () => {
+    void queryClient.invalidateQueries({ queryKey: ['journal-admin'] });
+    void queryClient.invalidateQueries({ queryKey: ['journal-feed'], exact: false });
+    void queryClient.invalidateQueries({ queryKey: ['journal-mine'] });
+  };
+
+  const save = useMutation({
+    mutationFn: (id: string) =>
+      api(`/journal/${id}`, {
+        method: 'PUT',
+        body: {
+          title: title.trim(),
+          body: body.trim(),
+          visibility,
+          catches: catches.map((c) => ({ ...c, notes: c.notes?.trim() || null })),
+        },
+      }),
     onSuccess: () => {
-      toast.success('Story approved — it’s live on the public journal.');
-      setReviewing(null);
-      invalidate();
-    },
-    onError,
-  });
-
-  const reject = useMutation({
-    mutationFn: ({ id, reason }: { id: string; reason: string }) =>
-      api(`/journal/${id}/reject`, { method: 'PUT', body: { reason: reason || null } }),
-    onSuccess: () => {
-      toast.success('Story not posted — the guest has been notified.');
-      setRejecting(null);
-      setReviewing(null);
-      setReason('');
+      toast.success('Entry updated.');
+      setEditing(null);
       invalidate();
     },
     onError,
@@ -57,7 +79,7 @@ export default function JournalTab() {
   const archive = useMutation({
     mutationFn: (id: string) => api(`/journal/${id}/archive`, { method: 'PUT' }),
     onSuccess: () => {
-      toast.success('Story archived — hidden from the public feed.');
+      toast.success('Entry hidden — only its author and moderators can see it now.');
       invalidate();
     },
     onError,
@@ -66,7 +88,22 @@ export default function JournalTab() {
   const unarchive = useMutation({
     mutationFn: (id: string) => api(`/journal/${id}/unarchive`, { method: 'PUT' }),
     onSuccess: () => {
-      toast.success('Story restored to the public feed.');
+      toast.success('Entry restored to the journal.');
+      invalidate();
+    },
+    onError,
+  });
+
+  const remove = useMutation({
+    mutationFn: (id: string) =>
+      api<{ deleted: boolean; photos_removed: number }>(`/journal/${id}`, { method: 'DELETE' }),
+    onSuccess: (res) => {
+      toast.success(
+        res.photos_removed > 0
+          ? `Entry deleted, along with ${res.photos_removed} photo${res.photos_removed === 1 ? '' : 's'}.`
+          : 'Entry deleted.',
+      );
+      setDeleting(null);
       invalidate();
     },
     onError,
@@ -84,90 +121,96 @@ export default function JournalTab() {
 
   return (
     <>
-      <div className="mb-4 flex rounded-lg border border-sand bg-white p-0.5">
-        {STATUSES.map((s) => (
-          <button
-            key={s}
-            onClick={() => setStatus(s)}
-            className={cx(
-              'rounded-md px-3 py-1.5 text-xs font-semibold capitalize transition',
-              status === s ? 'bg-forest-600 text-cream' : 'text-muted hover:text-charcoal',
-            )}
-          >
-            {s}
-          </button>
-        ))}
-      </div>
+      <p className="mb-4 text-sm text-muted">
+        Entries go live as soon as they're written — there's no review queue. Use these to fix,
+        hide, or remove something after the fact.
+      </p>
 
       {entries.length === 0 ? (
-        <EmptyState title="No journal entries here" />
+        <EmptyState title="No journal entries yet" />
       ) : (
         <div className="overflow-x-auto rounded-xl border border-sand bg-white">
-          <table className="w-full min-w-[760px] text-sm">
+          <table className="w-full min-w-[860px] text-sm">
             <thead className="border-b border-sand bg-cream-dark/60 text-left text-xs uppercase tracking-wide text-muted">
               <tr>
                 <th className="px-3 py-2.5 font-bold">Guest</th>
                 <th className="px-3 py-2.5 font-bold">Stay</th>
-                <th className="px-3 py-2.5 font-bold">Title</th>
-                <th className="px-3 py-2.5 font-bold">Status</th>
-                <th className="px-3 py-2.5 font-bold">Submitted</th>
+                <th className="px-3 py-2.5 font-bold">Entry</th>
+                <th className="px-3 py-2.5 font-bold">Visible to</th>
+                <th className="px-3 py-2.5 font-bold">Posted</th>
                 <th className="px-3 py-2.5 text-right font-bold">Actions</th>
               </tr>
             </thead>
             <tbody>
               {entries.map((e) => (
-                <tr key={e.id} className="border-b border-sand/70 last:border-0">
+                <tr
+                  key={e.id}
+                  className={cx(
+                    'border-b border-sand/70 last:border-0',
+                    e.archived_at && 'bg-cream-dark/40',
+                  )}
+                >
                   <td className="px-3 py-2.5">
                     <p className="font-semibold text-charcoal">{e.guest_name ?? '—'}</p>
                     <p className="text-xs text-muted">{e.guest_email}</p>
                   </td>
-                  <td className="px-3 py-2.5 text-charcoal">{formatRange(e.check_in, e.check_out)}</td>
-                  <td className="max-w-[220px] truncate px-3 py-2.5 text-charcoal">{e.title}</td>
+                  <td className="px-3 py-2.5 text-charcoal">
+                    {formatRange(e.check_in, e.check_out)}
+                  </td>
+                  <td className="max-w-[260px] px-3 py-2.5">
+                    <p className="truncate text-charcoal">{e.title}</p>
+                    <p className="text-xs text-muted">
+                      {[
+                        e.catches.length > 0 &&
+                          `${e.catches.length} catch${e.catches.length === 1 ? '' : 'es'}`,
+                        e.photos.length > 0 &&
+                          `${e.photos.length} photo${e.photos.length === 1 ? '' : 's'}`,
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </p>
+                  </td>
                   <td className="px-3 py-2.5">
-                    <div className="flex flex-wrap gap-1">
-                      <span
-                        className={cx(
-                          'inline-block rounded-full border px-2.5 py-0.5 text-xs font-semibold capitalize',
-                          STATUS_STYLES[e.status],
-                        )}
-                      >
-                        {e.status}
-                      </span>
-                      {e.archived_at && (
-                        <span className="inline-block rounded-full border border-sand bg-cream-dark text-muted px-2.5 py-0.5 text-xs font-semibold">
-                          Archived
-                        </span>
-                      )}
-                    </div>
+                    <JournalVisibilityBadge
+                      visibility={e.visibility}
+                      archived={Boolean(e.archived_at)}
+                    />
                   </td>
                   <td className="px-3 py-2.5 text-xs text-muted">
                     {format(new Date(e.created_at), 'MMM d, yyyy')}
                   </td>
                   <td className="px-3 py-2.5">
                     <div className="flex justify-end gap-1.5">
-                      <Button size="sm" variant="ghost" onClick={() => setReviewing(e)}>
-                        Review
+                      <Button size="sm" variant="ghost" onClick={() => setEditing(e)}>
+                        <Pencil size={14} /> Edit
                       </Button>
-                      {e.status === 'approved' && !e.archived_at && (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          disabled={archive.isPending}
-                          onClick={() => archive.mutate(e.id)}
-                        >
-                          <Archive size={14} /> Archive
-                        </Button>
-                      )}
-                      {e.archived_at && (
+                      {e.archived_at ? (
                         <Button
                           size="sm"
                           variant="ghost"
                           disabled={unarchive.isPending}
                           onClick={() => unarchive.mutate(e.id)}
                         >
-                          <ArchiveRestore size={14} /> Unarchive
+                          <ArchiveRestore size={14} /> Unhide
+                        </Button>
+                      ) : (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={archive.isPending}
+                          onClick={() => archive.mutate(e.id)}
+                        >
+                          <Archive size={14} /> Hide
                         </Button>
                       )}
+                      <button
+                        onClick={() => setDeleting(e)}
+                        title="Delete permanently"
+                        aria-label="Delete permanently"
+                        className="shrink-0 rounded p-2 text-muted hover:bg-cream-dark hover:text-clay"
+                      >
+                        <Trash2 size={16} />
+                      </button>
                     </div>
                   </td>
                 </tr>
@@ -177,64 +220,85 @@ export default function JournalTab() {
         </div>
       )}
 
-      <Modal open={Boolean(reviewing)} onClose={() => setReviewing(null)} title={reviewing?.title ?? 'Story'}>
-        {reviewing && (
+      <Modal
+        open={Boolean(editing)}
+        onClose={() => setEditing(null)}
+        title={`Edit: ${editing?.title ?? ''}`}
+      >
+        {editing && (
           <div className="space-y-4">
-            <div className="text-sm text-muted">
-              <p>
-                <strong className="text-charcoal">{reviewing.guest_name ?? reviewing.guest_email}</strong> ·{' '}
-                {formatRange(reviewing.check_in, reviewing.check_out)}
-              </p>
-              <p>Submitted {format(new Date(reviewing.created_at), 'MMM d, yyyy')}</p>
-            </div>
-            <p className="max-h-64 overflow-y-auto whitespace-pre-wrap rounded-lg bg-cream-dark/50 p-3 text-sm text-charcoal">
-              {reviewing.body}
+            <p className="text-sm text-muted">
+              <strong className="text-charcoal">{editing.guest_name ?? editing.guest_email}</strong>{' '}
+              · {formatRange(editing.check_in, editing.check_out)}
             </p>
-            {reviewing.rejected_reason && (
-              <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-900">
-                Rejected: {reviewing.rejected_reason}
-              </p>
-            )}
-            {reviewing.status === 'pending' && (
-              <div className="flex justify-end gap-2">
-                <Button
-                  variant="danger"
-                  disabled={reject.isPending}
-                  onClick={() => setRejecting(reviewing)}
-                >
-                  <X size={14} /> Reject
-                </Button>
-                <Button disabled={approve.isPending} onClick={() => approve.mutate(reviewing.id)}>
-                  <Check size={14} /> Approve
-                </Button>
-              </div>
-            )}
+
+            <Field label="Title">
+              <Input value={title} onChange={(e) => setTitle(e.target.value)} />
+            </Field>
+            <Field label="Story">
+              <Textarea rows={8} value={body} onChange={(e) => setBody(e.target.value)} />
+            </Field>
+            <CatchLog catches={catches} onChange={setCatches} />
+            <JournalVisibilityChoice
+              value={visibility}
+              onChange={setVisibility}
+              name="admin-journal-visibility"
+            />
+            <JournalPhotos
+              entryId={editing.id}
+              photos={editing.photos}
+              editable
+              onChanged={invalidate}
+            />
+
+            <div className="flex justify-end gap-2">
+              <Button variant="ghost" onClick={() => setEditing(null)}>
+                Cancel
+              </Button>
+              <Button disabled={save.isPending} onClick={() => save.mutate(editing.id)}>
+                {save.isPending ? 'Saving…' : 'Save changes'}
+              </Button>
+            </div>
           </div>
         )}
       </Modal>
 
-      <Modal open={Boolean(rejecting)} onClose={() => setRejecting(null)} title="Don't post this story?">
-        <p className="mb-3 text-sm text-muted">
-          {rejecting?.guest_name} · {rejecting?.title}
-        </p>
-        <Textarea
-          rows={3}
-          value={reason}
-          onChange={(e) => setReason(e.target.value)}
-          placeholder="Reason (optional — kept warm, the guest will see this)"
-        />
-        <div className="mt-4 flex justify-end gap-2">
-          <Button variant="ghost" onClick={() => setRejecting(null)}>
-            Never mind
-          </Button>
-          <Button
-            variant="danger"
-            disabled={reject.isPending}
-            onClick={() => rejecting && reject.mutate({ id: rejecting.id, reason })}
-          >
-            {reject.isPending ? 'Saving…' : "Don't post it"}
-          </Button>
-        </div>
+      <Modal
+        open={Boolean(deleting)}
+        onClose={() => setDeleting(null)}
+        title="Delete this entry permanently?"
+      >
+        {deleting && (
+          <div className="space-y-4">
+            <p className="flex items-start gap-2 rounded-lg border border-red-300 bg-red-50 px-3 py-2.5 text-sm text-red-900">
+              <TriangleAlert size={16} className="mt-0.5 shrink-0" />
+              <span>
+                This can't be undone. The story, its {deleting.catches.length} catch rows and{' '}
+                {deleting.photos.length} photos are removed for good — photo files included. To just
+                take it off the journal, hide it instead.
+              </span>
+            </p>
+            <div className="text-sm text-muted">
+              <p>
+                <strong className="text-charcoal">{deleting.guest_name ?? deleting.guest_email}</strong>{' '}
+                · {deleting.title}
+              </p>
+              <CatchSummary catches={deleting.catches} />
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="ghost" onClick={() => setDeleting(null)}>
+                Never mind
+              </Button>
+              <Button
+                variant="danger"
+                disabled={remove.isPending}
+                onClick={() => remove.mutate(deleting.id)}
+              >
+                {remove.isPending ? 'Deleting…' : 'Delete permanently'}
+              </Button>
+            </div>
+          </div>
+        )}
       </Modal>
     </>
   );
