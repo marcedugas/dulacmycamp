@@ -208,6 +208,11 @@ pub struct CatchRow {
     pub quantity: i32,
     pub notes: Option<String>,
     pub sort_order: i32,
+    /// Photos attached to this catch specifically. Filled by [`hydrate`]
+    /// from a separate query, never selected alongside the row itself —
+    /// hence `skip`, which keeps it out of the decode entirely.
+    #[sqlx(skip)]
+    pub photos: Vec<PhotoRow>,
 }
 
 #[derive(Debug, Clone, Serialize, FromRow)]
@@ -217,6 +222,10 @@ pub struct PhotoRow {
     pub caption: Option<String>,
     pub sort_order: i32,
     pub created_at: DateTime<Utc>,
+    /// `None` is a general entry photo — the gallery's, and the only kind
+    /// that existed before migration 0017. `Some` means it belongs to that
+    /// catch row and travels with it instead.
+    pub journal_catch_id: Option<Uuid>,
 }
 
 /// A child row plus the entry it hangs off, so one query can fetch them for
@@ -244,7 +253,7 @@ async fn catches_for(db: &PgPool, entry_ids: &[Uuid]) -> Result<Vec<Owned<CatchR
 
 async fn photos_for(db: &PgPool, entry_ids: &[Uuid]) -> Result<Vec<Owned<PhotoRow>>, sqlx::Error> {
     sqlx::query_as::<_, Owned<PhotoRow>>(
-        "SELECT journal_entry_id, id, url, caption, sort_order, created_at
+        "SELECT journal_entry_id, id, url, caption, sort_order, created_at, journal_catch_id
          FROM journal_photos
          WHERE journal_entry_id = ANY($1)
          ORDER BY sort_order, created_at",
@@ -256,6 +265,12 @@ async fn photos_for(db: &PgPool, entry_ids: &[Uuid]) -> Result<Vec<Owned<PhotoRo
 
 /// Attaches each entry's catches and photos in two queries rather than two
 /// per entry.
+///
+/// Photos are partitioned rather than listed twice: one tagged with a
+/// `journal_catch_id` travels inside that catch, and only untagged ones
+/// reach the entry's own gallery. Nothing renders in both places, and a
+/// client that only knows about `photos` still sees exactly the general
+/// gallery it always did.
 async fn hydrate<T, F>(db: &PgPool, items: &mut [T], id_of: F) -> Result<(), sqlx::Error>
 where
     F: Fn(&T) -> Uuid,
@@ -274,13 +289,21 @@ where
             catches
                 .iter()
                 .filter(|o| o.journal_entry_id == id)
-                .map(|o| o.child.clone())
+                .map(|o| {
+                    let mut c = o.child.clone();
+                    c.photos = photos
+                        .iter()
+                        .filter(|p| p.child.journal_catch_id == Some(c.id))
+                        .map(|p| p.child.clone())
+                        .collect();
+                    c
+                })
                 .collect(),
         );
         item.set_photos(
             photos
                 .iter()
-                .filter(|o| o.journal_entry_id == id)
+                .filter(|o| o.journal_entry_id == id && o.child.journal_catch_id.is_none())
                 .map(|o| o.child.clone())
                 .collect(),
         );
@@ -532,11 +555,17 @@ pub async fn eligible_bookings(
     Ok(Json(rows))
 }
 
-/// One catch as submitted from the form. Ids are not accepted: a save
-/// replaces the entry's catch rows wholesale, which is what a repeatable-row
-/// form actually expresses and saves reconciling three-way diffs.
+/// One catch as submitted from the form.
+///
+/// `id` is the id of a row already saved against this entry, and it is how a
+/// catch keeps its identity across a save. That matters now that photos hang
+/// off `journal_catches.id`: a save that deleted and reinserted every row
+/// would cascade away every attached photo along with it. An `id` that names
+/// no row of *this* entry is ignored rather than adopted, so a submitted id
+/// can never reach across entries. Omitted means a brand-new row.
 #[derive(Debug, Deserialize)]
 pub struct CatchInput {
+    pub id: Option<Uuid>,
     pub species_id: Option<Uuid>,
     pub length_inches: Option<f64>,
     pub weight_lbs: Option<f64>,
@@ -548,6 +577,7 @@ pub struct CatchInput {
 /// database.
 #[derive(Debug, PartialEq)]
 struct CleanCatch {
+    id: Option<Uuid>,
     species_id: Option<Uuid>,
     length_inches: Option<f64>,
     weight_lbs: Option<f64>,
@@ -574,6 +604,7 @@ fn clean_catches(catches: &[CatchInput]) -> ApiResult<Vec<CleanCatch>> {
             }
         }
         out.push(CleanCatch {
+            id: c.id,
             species_id: c.species_id,
             length_inches: c.length_inches,
             weight_lbs: c.weight_lbs,
@@ -589,37 +620,104 @@ fn clean_catches(catches: &[CatchInput]) -> ApiResult<Vec<CleanCatch>> {
     Ok(out)
 }
 
-/// Replaces an entry's catch rows inside the caller's transaction.
+/// Which of this entry's existing catch rows a submitted list keeps alive.
 ///
-/// Wholesale replacement rather than a row-by-row diff: that is what a
-/// repeatable-row form actually submits, and it keeps `sort_order` honest
-/// without reconciling three versions of the list.
+/// An id is honoured only if it names a row of *this* entry. That is the
+/// security half of the rule as much as the correctness half: without it a
+/// submitted id could reach into somebody else's catch log and have this
+/// entry's save overwrite it. An unrecognised id is not an error — it simply
+/// doesn't match anything, so the row it came with is inserted fresh.
+fn surviving_catch_ids(submitted: &[CleanCatch], mine: &[Uuid]) -> Vec<Uuid> {
+    submitted
+        .iter()
+        .filter_map(|c| c.id)
+        .filter(|id| mine.contains(id))
+        .collect()
+}
+
+/// Writes an entry's catch rows inside the caller's transaction, keeping the
+/// identity of rows that were already there.
+///
+/// This used to delete every row and reinsert the list, which is the simplest
+/// thing that works for a repeatable-row form — until photos started hanging
+/// off `journal_catches.id`. Under `ON DELETE CASCADE`, a delete-and-reinsert
+/// save would take every attached photo with it on a save that changed
+/// nothing. So a row that submits an id it already owns is updated in place,
+/// and only rows genuinely dropped from the list are deleted.
+///
+/// Returns the upload URLs of photos that belonged to the deleted rows. Their
+/// database rows cascade away here; the files are the caller's to unlink once
+/// the transaction has actually committed.
 async fn write_catches(
     tx: &mut Transaction<'_, Postgres>,
     entry_id: Uuid,
     catches: &[CleanCatch],
-) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM journal_catches WHERE journal_entry_id = $1")
+) -> Result<Vec<String>, sqlx::Error> {
+    let mine: Vec<(Uuid,)> =
+        sqlx::query_as("SELECT id FROM journal_catches WHERE journal_entry_id = $1")
+            .bind(entry_id)
+            .fetch_all(&mut **tx)
+            .await?;
+    let mine: Vec<Uuid> = mine.into_iter().map(|(id,)| id).collect();
+    let keep = surviving_catch_ids(catches, &mine);
+
+    // Collected before the delete: once the rows cascade there is nothing
+    // left to say which files were theirs.
+    let orphaned: Vec<(String,)> = sqlx::query_as(
+        "SELECT p.url FROM journal_photos p
+         JOIN journal_catches c ON c.id = p.journal_catch_id
+         WHERE c.journal_entry_id = $1 AND NOT (c.id = ANY($2))",
+    )
+    .bind(entry_id)
+    .bind(&keep)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    sqlx::query("DELETE FROM journal_catches WHERE journal_entry_id = $1 AND NOT (id = ANY($2))")
         .bind(entry_id)
+        .bind(&keep)
         .execute(&mut **tx)
         .await?;
+
     for (i, c) in catches.iter().enumerate() {
-        sqlx::query(
-            "INSERT INTO journal_catches
-                (journal_entry_id, species_id, length_inches, weight_lbs, quantity, notes, sort_order)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
-        )
-        .bind(entry_id)
-        .bind(c.species_id)
-        .bind(c.length_inches)
-        .bind(c.weight_lbs)
-        .bind(c.quantity)
-        .bind(&c.notes)
-        .bind(i as i32)
-        .execute(&mut **tx)
-        .await?;
+        let sort_order = i as i32;
+        match c.id.filter(|id| keep.contains(id)) {
+            Some(id) => {
+                sqlx::query(
+                    "UPDATE journal_catches
+                     SET species_id = $2, length_inches = $3, weight_lbs = $4,
+                         quantity = $5, notes = $6, sort_order = $7
+                     WHERE id = $1",
+                )
+                .bind(id)
+                .bind(c.species_id)
+                .bind(c.length_inches)
+                .bind(c.weight_lbs)
+                .bind(c.quantity)
+                .bind(&c.notes)
+                .bind(sort_order)
+                .execute(&mut **tx)
+                .await?;
+            }
+            None => {
+                sqlx::query(
+                    "INSERT INTO journal_catches
+                        (journal_entry_id, species_id, length_inches, weight_lbs, quantity, notes, sort_order)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                )
+                .bind(entry_id)
+                .bind(c.species_id)
+                .bind(c.length_inches)
+                .bind(c.weight_lbs)
+                .bind(c.quantity)
+                .bind(&c.notes)
+                .bind(sort_order)
+                .execute(&mut **tx)
+                .await?;
+            }
+        }
     }
-    Ok(())
+    Ok(orphaned.into_iter().map(|(url,)| url).collect())
 }
 
 #[derive(Debug, Deserialize)]
@@ -692,6 +790,7 @@ pub async fn create(
     .bind(visibility)
     .fetch_one(&mut *tx)
     .await?;
+    // A brand-new entry has no earlier catch rows, so nothing can be orphaned.
     write_catches(&mut tx, entry.id, &catches).await?;
     tx.commit().await?;
 
@@ -774,8 +873,14 @@ pub async fn update(
     .bind(visibility)
     .execute(&mut *tx)
     .await?;
-    write_catches(&mut tx, id, &catches).await?;
+    let orphaned = write_catches(&mut tx, id, &catches).await?;
     tx.commit().await?;
+
+    // Only once the delete is actually committed: unlinking a file for a
+    // transaction that then rolled back would lose a photo that still exists.
+    for url in &orphaned {
+        delete_upload_file(&state, url).await;
+    }
 
     Ok(Json(load_full(&state.db, id).await?))
 }
@@ -843,9 +948,18 @@ async fn require_can_edit(state: &Shared, user: &User, entry_id: Uuid) -> ApiRes
 }
 
 /// `POST /api/journal/{id}/photos` — multipart, field name `file`, optional
-/// `caption`. The entry's author or a moderator. Same upload plumbing as the
-/// site gallery (see [`crate::uploads`]), so the type and size rules are
-/// identical by construction.
+/// `caption`, optional `journal_catch_id`. The entry's author or a moderator.
+/// Same upload plumbing as the site gallery (see [`crate::uploads`]), so the
+/// type and size rules are identical by construction.
+///
+/// With `journal_catch_id` the photo belongs to that one catch and shows with
+/// it; without, it is a general entry photo for the gallery, exactly as
+/// before. A catch photo is *not* also a gallery photo — the two sets are
+/// disjoint, so nothing is ever shown twice (see [`hydrate`]).
+///
+/// There is no per-entry photo cap to interact with: none exists today, and
+/// this change does not invent one. The size and type limits that do exist
+/// are per-file and apply to both kinds identically.
 pub async fn upload_photo(
     State(state): State<Shared>,
     AuthUser(user): AuthUser,
@@ -856,6 +970,7 @@ pub async fn upload_photo(
 
     let mut url = None;
     let mut caption = None;
+    let mut catch_id: Option<Uuid> = None;
     while let Some(field) = multipart.next_field().await.map_err(bad_multipart)? {
         match field.name() {
             Some("file") => url = Some(save_upload(&state, field).await?),
@@ -863,18 +978,48 @@ pub async fn upload_photo(
                 let text = field.text().await.map_err(bad_multipart)?;
                 caption = Some(text).filter(|s: &String| !s.trim().is_empty());
             }
+            Some("journal_catch_id") => {
+                let text = field.text().await.map_err(bad_multipart)?;
+                let text = text.trim();
+                if !text.is_empty() {
+                    catch_id = Some(Uuid::parse_str(text).map_err(|_| {
+                        AppError::BadRequest("That isn't a valid catch id.".into())
+                    })?);
+                }
+            }
             _ => {}
         }
     }
     let url = url.ok_or_else(|| AppError::BadRequest("No file provided.".into()))?;
 
+    // The catch must belong to the entry named in the path, or the photo
+    // would be reachable through an entry its author cannot edit.
+    if let Some(catch_id) = catch_id {
+        let (belongs,): (bool,) = sqlx::query_as(
+            "SELECT EXISTS(SELECT 1 FROM journal_catches WHERE id = $1 AND journal_entry_id = $2)",
+        )
+        .bind(catch_id)
+        .bind(id)
+        .fetch_one(&state.db)
+        .await?;
+        if !belongs {
+            // The file is already on disk at this point; drop it rather than
+            // leaving an upload nothing will ever reference.
+            delete_upload_file(&state, &url).await;
+            return Err(AppError::NotFound(
+                "That catch isn't part of this entry.".into(),
+            ));
+        }
+    }
+
     let row = sqlx::query_as::<_, PhotoRow>(
-        "INSERT INTO journal_photos (journal_entry_id, url, caption, sort_order)
-         VALUES ($1, $2, $3, COALESCE(
+        "INSERT INTO journal_photos (journal_entry_id, journal_catch_id, url, caption, sort_order)
+         VALUES ($1, $2, $3, $4, COALESCE(
              (SELECT max(sort_order) + 1 FROM journal_photos WHERE journal_entry_id = $1), 0))
-         RETURNING id, url, caption, sort_order, created_at",
+         RETURNING id, url, caption, sort_order, created_at, journal_catch_id",
     )
     .bind(id)
+    .bind(catch_id)
     .bind(&url)
     .bind(caption)
     .fetch_one(&state.db)
@@ -1228,6 +1373,7 @@ mod tests {
     #[test]
     fn a_catch_defaults_to_a_quantity_of_one() {
         let cleaned = clean_catches(&[CatchInput {
+            id: None,
             species_id: None,
             length_inches: None,
             weight_lbs: None,
@@ -1243,6 +1389,7 @@ mod tests {
         for quantity in [0, -3] {
             assert!(matches!(
                 clean_catches(&[CatchInput {
+                    id: None,
                     species_id: None,
                     length_inches: None,
                     weight_lbs: None,
@@ -1260,6 +1407,7 @@ mod tests {
             assert!(
                 matches!(
                     clean_catches(&[CatchInput {
+                        id: None,
                         species_id: None,
                         length_inches: Some(bad),
                         weight_lbs: None,
@@ -1273,6 +1421,7 @@ mod tests {
             assert!(
                 matches!(
                     clean_catches(&[CatchInput {
+                        id: None,
                         species_id: None,
                         length_inches: None,
                         weight_lbs: Some(bad),
@@ -1289,6 +1438,7 @@ mod tests {
     #[test]
     fn blank_catch_notes_are_stored_as_nothing_at_all() {
         let cleaned = clean_catches(&[CatchInput {
+            id: None,
             species_id: None,
             length_inches: None,
             weight_lbs: None,
@@ -1297,6 +1447,81 @@ mod tests {
         }])
         .unwrap();
         assert_eq!(cleaned[0].notes, None);
+    }
+
+    // ─────────────── catch identity across a save ───────────────
+
+    fn catch_with_id(id: Option<Uuid>) -> CleanCatch {
+        CleanCatch {
+            id,
+            species_id: None,
+            length_inches: None,
+            weight_lbs: None,
+            quantity: 1,
+            notes: None,
+        }
+    }
+
+    /// The reason this rule exists: a row that keeps its id keeps its photos,
+    /// because `journal_photos.journal_catch_id` cascades on delete.
+    #[test]
+    fn a_resubmitted_row_of_this_entry_survives_the_save() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let submitted = [catch_with_id(Some(a)), catch_with_id(Some(b))];
+        assert_eq!(surviving_catch_ids(&submitted, &[a, b]), vec![a, b]);
+    }
+
+    #[test]
+    fn a_row_dropped_from_the_list_does_not_survive() {
+        let kept = Uuid::new_v4();
+        let dropped = Uuid::new_v4();
+        let submitted = [catch_with_id(Some(kept))];
+        assert_eq!(
+            surviving_catch_ids(&submitted, &[kept, dropped]),
+            vec![kept]
+        );
+    }
+
+    /// A submitted id belonging to a different entry must not be adopted —
+    /// otherwise this entry's save would overwrite someone else's catch.
+    #[test]
+    fn an_id_from_another_entry_is_ignored_rather_than_adopted() {
+        let mine = Uuid::new_v4();
+        let someone_elses = Uuid::new_v4();
+        let submitted = [catch_with_id(Some(someone_elses))];
+        assert!(surviving_catch_ids(&submitted, &[mine]).is_empty());
+    }
+
+    #[test]
+    fn a_brand_new_row_carries_no_id_and_keeps_nothing_alive() {
+        let mine = Uuid::new_v4();
+        assert!(surviving_catch_ids(&[catch_with_id(None)], &[mine]).is_empty());
+        // ...and on a brand-new entry there is nothing to keep either way.
+        assert!(surviving_catch_ids(&[catch_with_id(None)], &[]).is_empty());
+    }
+
+    /// An empty submitted list clears the log — every existing row is dropped,
+    /// which is what takes their photos with them.
+    #[test]
+    fn submitting_no_catches_keeps_nothing() {
+        let mine = Uuid::new_v4();
+        assert!(surviving_catch_ids(&[], &[mine]).is_empty());
+    }
+
+    #[test]
+    fn a_submitted_id_survives_validation_into_the_clean_shape() {
+        let id = Uuid::new_v4();
+        let cleaned = clean_catches(&[CatchInput {
+            id: Some(id),
+            species_id: None,
+            length_inches: None,
+            weight_lbs: None,
+            quantity: Some(3),
+            notes: None,
+        }])
+        .unwrap();
+        assert_eq!(cleaned[0].id, Some(id));
     }
 
     #[test]

@@ -14,7 +14,7 @@ import {
   Textarea,
   cx,
 } from '../../components/ui';
-import { CatchLog, CatchSummary, toCatchInputs } from '../../components/CatchLog';
+import { CatchLog, CatchSummary, catchPhotosOf, toCatchInputs } from '../../components/CatchLog';
 import { JournalPhotos } from '../../components/JournalPhotos';
 import { JournalVisibilityChoice } from '../../components/JournalVisibility';
 import { api, ApiError } from '../../lib/api';
@@ -30,6 +30,15 @@ const onError = (err: unknown) =>
  * themselves, so nothing here is a gate. Three levers, escalating: edit the
  * content, hide it (archive, reversible), or delete it outright.
  */
+
+/**
+ * Every photo an entry would lose to a delete: the gallery's, plus the ones
+ * attached to individual catches, which the API sends inside those rows
+ * rather than in `photos`.
+ */
+const photoCount = (e: { photos: unknown[]; catches: { photos: unknown[] }[] }) =>
+  e.photos.length + e.catches.reduce((n, c) => n + c.photos.length, 0);
+
 export default function JournalTab() {
   const { data, isLoading } = useJournalAdmin();
   const queryClient = useQueryClient();
@@ -163,8 +172,8 @@ export default function JournalTab() {
                       {[
                         e.catches.length > 0 &&
                           `${e.catches.length} catch${e.catches.length === 1 ? '' : 'es'}`,
-                        e.photos.length > 0 &&
-                          `${e.photos.length} photo${e.photos.length === 1 ? '' : 's'}`,
+                        photoCount(e) > 0 &&
+                          `${photoCount(e)} photo${photoCount(e) === 1 ? '' : 's'}`,
                       ]
                         .filter(Boolean)
                         .join(' · ')}
@@ -238,7 +247,13 @@ export default function JournalTab() {
             <Field label="Story">
               <Textarea rows={8} value={body} onChange={(e) => setBody(e.target.value)} />
             </Field>
-            <CatchLog catches={catches} onChange={setCatches} />
+            <CatchLog
+              catches={catches}
+              onChange={setCatches}
+              entryId={editing.id}
+              photos={catchPhotosOf(editing.catches)}
+              onPhotosChanged={invalidate}
+            />
             <JournalVisibilityChoice
               value={visibility}
               onChange={setVisibility}
@@ -274,7 +289,7 @@ export default function JournalTab() {
               <TriangleAlert size={16} className="mt-0.5 shrink-0" />
               <span>
                 This can't be undone. The story, its {deleting.catches.length} catch rows and{' '}
-                {deleting.photos.length} photos are removed for good — photo files included. To just
+                {photoCount(deleting)} photos are removed for good — photo files included. To just
                 take it off the journal, hide it instead.
               </span>
             </p>

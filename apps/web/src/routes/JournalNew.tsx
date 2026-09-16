@@ -4,7 +4,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { BookOpen, Send, Tent } from 'lucide-react';
 import { Button, Card, EmptyState, Field, Input, PageHeader, Spinner, Textarea } from '../components/ui';
-import { CatchLog, toCatchInputs } from '../components/CatchLog';
+import { CatchLog, catchPhotosOf, toCatchInputs } from '../components/CatchLog';
 import { JournalPhotos } from '../components/JournalPhotos';
 import { JournalVisibilityChoice } from '../components/JournalVisibility';
 import { api, ApiError } from '../lib/api';
@@ -99,6 +99,18 @@ export default function JournalNew() {
     onError: (err) => toast.error(err instanceof ApiError ? err.message : 'Could not save your changes.'),
   });
 
+  // Photos hang off saved catch rows, so the log only offers them in edit
+  // mode — a story being written for the first time has no rows yet.
+  const catchLog = (
+    <CatchLog
+      catches={catches}
+      onChange={setCatches}
+      entryId={editing?.id}
+      photos={editing ? catchPhotosOf(editing.catches) : []}
+      onPhotosChanged={invalidate}
+    />
+  );
+
   const storyFields = (
     <>
       <Field label="Title">
@@ -118,7 +130,7 @@ export default function JournalNew() {
           placeholder="Tell us about your stay…"
         />
       </Field>
-      <CatchLog catches={catches} onChange={setCatches} />
+      {catchLog}
       <JournalVisibilityChoice value={visibility} onChange={setVisibility} />
     </>
   );
@@ -196,6 +208,18 @@ export default function JournalNew() {
               It's live in the camp journal now — add some photos below if you'd like, or come back
               and edit it any time.
             </p>
+            {catches.length > 0 && (
+              <p className="mt-2 text-sm text-muted">
+                Want a photo on a particular fish?{' '}
+                <Link
+                  to={`/journal/new?entry_id=${created.id}`}
+                  className="font-semibold text-forest-700 underline"
+                >
+                  Edit your story
+                </Link>{' '}
+                and attach it to that catch.
+              </p>
+            )}
           </Card>
 
           <div className="mt-4">
