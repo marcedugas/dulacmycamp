@@ -335,10 +335,18 @@ export interface JournalCatch {
   quantity: number;
   notes: string | null;
   sort_order: number;
+  /** Photos attached to this catch specifically. Disjoint from the entry's
+   *  own `photos`: a catch photo shows with its catch, never in the gallery. */
+  photos: JournalPhoto[];
 }
 
-/** A catch as submitted — no id, since a save replaces the whole list. */
+/** A catch as submitted.
+ *
+ *  `id` is how a row keeps its identity across a save — photos hang off it,
+ *  so a save that dropped ids would cascade them away. `null` is a row that
+ *  hasn't been saved yet. */
 export interface JournalCatchInput {
+  id: string | null;
   species_id: string | null;
   length_inches: number | null;
   weight_lbs: number | null;
@@ -352,6 +360,9 @@ export interface JournalPhoto {
   caption: string | null;
   sort_order: number;
   created_at: string;
+  /** `null` is a general entry photo — the gallery's. Set means it belongs
+   *  to that catch row instead. */
+  journal_catch_id: string | null;
 }
 
 /** An entry as its own author (or a moderator) works on it. */

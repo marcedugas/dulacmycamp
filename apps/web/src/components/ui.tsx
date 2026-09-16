@@ -112,9 +112,11 @@ export function Input({ className, ...rest }: InputHTMLAttributes<HTMLInputEleme
 }
 
 /**
- * A whole-number field that lets you empty it while you are still typing.
+ * The half of a number field that makes it survive being emptied: a draft
+ * string, shown as typed, resynced from the committed value only when nobody
+ * is mid-edit.
  *
- * The obvious version — `onChange={(e) => set(Number(e.target.value) || min)}`
+ * The obvious version of a number input — `onChange={(e) => set(Number(e.target.value) || min)}`
  * — cannot hold an empty string: clearing the box makes `Number('')` zero,
  * the `|| min` turns that into the minimum, and the field refills itself
  * under the cursor. On a desktop that is easy to miss, because selecting the
@@ -123,9 +125,29 @@ export function Input({ className, ...rest }: InputHTMLAttributes<HTMLInputEleme
  * every time: clearing "10" to type "2" leaves a stubborn "1" behind and you
  * end up with "12".
  *
- * So the draft string is what the person sees, and it is allowed to be empty
- * or half-finished. A value only reaches the parent when it parses inside the
- * range, and the draft is clamped to a real integer on blur.
+ * Both fields below are that same fix, differing only in what a settled
+ * value is — a required integer, or an optional measurement.
+ */
+function useNumberDraft(display: string) {
+  const [draft, setDraft] = useState(display);
+  const [editing, setEditing] = useState(false);
+
+  // Follow the value when it changes from outside — but never while someone
+  // is mid-edit, which is the whole bug this hook exists to avoid.
+  useEffect(() => {
+    if (!editing) setDraft(display);
+  }, [display, editing]);
+
+  return { draft, setDraft, editing, setEditing };
+}
+
+/**
+ * A whole-number field that lets you empty it while you are still typing.
+ *
+ * A value only reaches the parent when it parses inside the range, and the
+ * draft is clamped to a real integer on blur. `max` is optional: a guest
+ * count has a real ceiling, a count of fish does not, and inventing one here
+ * would clamp to a rule the API doesn't have.
  */
 export function CountInput({
   value,
@@ -138,18 +160,14 @@ export function CountInput({
   value: number;
   onChange: (next: number) => void;
   min: number;
-  max: number;
+  max?: number;
 } & Omit<InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange' | 'min' | 'max' | 'type'>) {
-  const [draft, setDraft] = useState(String(value));
-  const [editing, setEditing] = useState(false);
+  const { draft, setDraft, setEditing } = useNumberDraft(String(value));
 
-  // Follow the value when it changes from outside — but never while someone
-  // is mid-edit, which is the whole bug this component exists to avoid.
-  useEffect(() => {
-    if (!editing) setDraft(String(value));
-  }, [value, editing]);
-
-  const clamp = (n: number) => Math.min(max, Math.max(min, n));
+  const clamp = (n: number) => {
+    const floored = Math.max(min, n);
+    return max === undefined ? floored : Math.min(max, floored);
+  };
 
   return (
     <input
@@ -167,13 +185,75 @@ export function CountInput({
         // Empty and out-of-range drafts are legitimate mid-edit states; they
         // simply don't propagate until they mean something.
         const parsed = Number.parseInt(next, 10);
-        if (String(parsed) === next.trim() && parsed >= min && parsed <= max) onChange(parsed);
+        const inRange = parsed >= min && (max === undefined || parsed <= max);
+        if (String(parsed) === next.trim() && inRange) onChange(parsed);
       }}
       onBlur={() => {
         setEditing(false);
         const parsed = Number.parseInt(draft, 10);
         const settled = Number.isNaN(parsed) ? min : clamp(parsed);
         setDraft(String(settled));
+        if (settled !== value) onChange(settled);
+      }}
+      {...rest}
+    />
+  );
+}
+
+/**
+ * {@link CountInput}'s optional, decimal twin — for a measurement that may
+ * legitimately not have been taken.
+ *
+ * Empty reports `null` rather than `0`, because a blank length means "didn't
+ * measure it", which is not the same claim as a fish zero inches long. And
+ * because the draft is held as typed, a half-written decimal survives: "2."
+ * commits 2 without the trailing dot being rewritten out from under the
+ * cursor before the "5" arrives.
+ */
+export function OptionalNumberInput({
+  value,
+  onChange,
+  min = 0,
+  step = '0.1',
+  className,
+  ...rest
+}: {
+  value: number | null;
+  onChange: (next: number | null) => void;
+  min?: number;
+  step?: string;
+} & Omit<InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange' | 'min' | 'step' | 'type'>) {
+  const { draft, setDraft, setEditing } = useNumberDraft(value === null ? '' : String(value));
+
+  const settle = (text: string): number | null => {
+    const trimmed = text.trim();
+    if (trimmed === '') return null;
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) && parsed >= min ? parsed : null;
+  };
+
+  return (
+    <input
+      type="number"
+      inputMode="decimal"
+      min={min}
+      step={step}
+      className={cx(CONTROL, className)}
+      value={draft}
+      onFocus={() => setEditing(true)}
+      onChange={(e) => {
+        const next = e.target.value;
+        setDraft(next);
+        // Cleared on purpose is a real answer here, so it propagates; a draft
+        // that doesn't parse yet ("-", "1e") simply waits for blur.
+        if (next.trim() === '') return onChange(null);
+        const parsed = settle(next);
+        if (parsed !== null) onChange(parsed);
+      }}
+      onBlur={() => {
+        setEditing(false);
+        const settled = settle(draft);
+        setDraft(settled === null ? '' : String(settled));
         if (settled !== value) onChange(settled);
       }}
       {...rest}
