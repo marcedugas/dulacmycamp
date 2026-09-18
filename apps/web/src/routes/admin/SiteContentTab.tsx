@@ -690,7 +690,7 @@ function GallerySection({ section }: { section: AboutSection }) {
         <p className="text-sm font-semibold">
           {upload.isPending ? 'Uploading…' : 'Click or drag a photo here to add it'}
         </p>
-        <p className="text-xs">JPG, PNG, or WEBP — up to 8MB</p>
+        <p className="text-xs">JPG, PNG, or WEBP — up to 20MB</p>
       </div>
       <input
         ref={fileInput}

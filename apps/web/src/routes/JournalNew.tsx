@@ -1,29 +1,31 @@
-import { useEffect, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { BookOpen, Send, Tent } from 'lucide-react';
-import { Button, Card, EmptyState, Field, Input, PageHeader, Spinner, Textarea } from '../components/ui';
-import { CatchLog, catchPhotosOf, toCatchInputs } from '../components/CatchLog';
-import { JournalPhotos } from '../components/JournalPhotos';
-import { JournalVisibilityChoice } from '../components/JournalVisibility';
-import { api, ApiError } from '../lib/api';
+import { Tent } from 'lucide-react';
+import { Card, EmptyState, Field, PageHeader, Spinner } from '../components/ui';
+import { JournalComposer } from '../components/JournalComposer';
+import { api } from '../lib/api';
 import { useJournalEligibleBookings, useJournalMine } from '../lib/queries';
 import { formatRange } from '../lib/dates';
-import type { JournalCatchInput, JournalEntry, JournalVisibility } from '../lib/types';
+import type { JournalEntry } from '../lib/types';
 
 /**
  * Doubles as the "new story" form (?booking_id=) and the "edit my story"
- * form (?entry_id=) — same fields, same card, just POST vs PUT underneath.
+ * form (?entry_id=) — the same composer either way, POST vs PUT underneath.
  *
- * Editing is no longer time-limited. With the review queue gone there is no
- * "already reviewed" state for a lock to protect, so an author can keep
- * adding to a stay's memory log as long as they like.
+ * Everything — story, catches, photos — is composed locally and sent by the
+ * one submit button, then it's straight back to the journal. There is no
+ * intermediate "now add photos" step any more; photos go in with the story.
+ *
+ * Editing is not time-limited. With no review queue there is no "already
+ * reviewed" state for a lock to protect.
  */
 export default function JournalNew() {
   const [params] = useSearchParams();
   const entryId = params.get('entry_id');
   const fromQuery = params.get('booking_id');
+  const navigate = useNavigate();
 
   const eligibleQuery = useJournalEligibleBookings();
   const mineQuery = useJournalMine();
@@ -33,26 +35,6 @@ export default function JournalNew() {
   const editing = entryId ? (mineQuery.data ?? []).find((e) => e.id === entryId) : undefined;
 
   const [pickedId, setPickedId] = useState<string | null>(fromQuery);
-  const [title, setTitle] = useState('');
-  const [body, setBody] = useState('');
-  // Family by default — the private option, matching the column default and
-  // the reservation privacy toggle's philosophy.
-  const [visibility, setVisibility] = useState<JournalVisibility>('family');
-  const [catches, setCatches] = useState<JournalCatchInput[]>([]);
-  const [seeded, setSeeded] = useState(false);
-  const [created, setCreated] = useState<JournalEntry | null>(null);
-
-  // Seed the form from the entry being edited, once — without this guard a
-  // background refetch would clobber whatever the author is mid-typing.
-  useEffect(() => {
-    if (editing && !seeded) {
-      setTitle(editing.title);
-      setBody(editing.body);
-      setVisibility(editing.visibility);
-      setCatches(toCatchInputs(editing.catches));
-      setSeeded(true);
-    }
-  }, [editing, seeded]);
 
   // Derived, not stored: when there's exactly one eligible stay, it's the
   // effective choice immediately — no separate "select it" step, and no
@@ -60,6 +42,9 @@ export default function JournalNew() {
   const bookingId = pickedId ?? (eligible.length === 1 ? eligible[0].booking_id : null);
   const chosen = bookingId ? eligible.find((b) => b.booking_id === bookingId) : undefined;
 
+  // Only once the whole submit is over. Invalidating mid-way would drop the
+  // just-journaled stay from `eligible` and unmount the form out from under
+  // a "some photos failed" retry.
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: ['journal-mine'] });
     void queryClient.invalidateQueries({ queryKey: ['journal-feed'], exact: false });
@@ -68,72 +53,23 @@ export default function JournalNew() {
     void queryClient.invalidateQueries({ queryKey: ['bookings'] });
   };
 
-  const payload = () => ({
-    title: title.trim(),
-    body: body.trim(),
-    visibility,
-    catches: catches.map((c) => ({ ...c, notes: c.notes?.trim() || null })),
-  });
+  const done = (message: string) => (outcome: { skippedPhotos: number }) => {
+    invalidate();
+    toast.success(
+      outcome.skippedPhotos > 0
+        ? `${message} Some photos weren't attached — you can add them by editing it.`
+        : message,
+    );
+    navigate('/journal');
+  };
 
-  const create = useMutation({
-    mutationFn: () =>
-      api<JournalEntry>('/journal', {
-        method: 'POST',
-        body: { booking_id: bookingId, ...payload() },
-      }),
-    onSuccess: (entry) => {
-      invalidate();
-      // Straight to the photo step: the entry is already live, so there is
-      // nothing to "finish submitting" — only more to add if they want.
-      setCreated(entry);
-    },
-    onError: (err) => toast.error(err instanceof ApiError ? err.message : 'Could not post your story.'),
-  });
-
-  const save = useMutation({
-    mutationFn: () => api<JournalEntry>(`/journal/${entryId}`, { method: 'PUT', body: payload() }),
-    onSuccess: () => {
-      toast.success('Story updated.');
-      invalidate();
-    },
-    onError: (err) => toast.error(err instanceof ApiError ? err.message : 'Could not save your changes.'),
-  });
-
-  // Photos hang off saved catch rows, so the log only offers them in edit
-  // mode — a story being written for the first time has no rows yet.
-  const catchLog = (
-    <CatchLog
-      catches={catches}
-      onChange={setCatches}
-      entryId={editing?.id}
-      photos={editing ? catchPhotosOf(editing.catches) : []}
-      onPhotosChanged={invalidate}
-    />
-  );
-
-  const storyFields = (
-    <>
-      <Field label="Title">
-        <Input
-          required
-          value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          placeholder="Redfish on the falling tide"
-        />
-      </Field>
-      <Field label="Story">
-        <Textarea
-          required
-          rows={9}
-          value={body}
-          onChange={(e) => setBody(e.target.value)}
-          placeholder="Tell us about your stay…"
-        />
-      </Field>
-      {catchLog}
-      <JournalVisibilityChoice value={visibility} onChange={setVisibility} />
-    </>
-  );
+  // Back to wherever they came from (My Stay, My Bookings, the feed) — or
+  // the journal, if this page was opened directly and there's no "back".
+  const leave = () => {
+    const idx = (window.history.state as { idx?: number } | null)?.idx ?? 0;
+    if (idx > 0) navigate(-1);
+    else navigate('/journal');
+  };
 
   // ── edit mode ──
   if (entryId) {
@@ -155,37 +91,23 @@ export default function JournalNew() {
     }
     return (
       <div className="mx-auto max-w-2xl px-4 py-10">
-        <PageHeader title="Edit your story" subtitle="Changes go live straight away." />
+        <PageHeader
+          title="Edit your story"
+          subtitle="Nothing changes until you press Save Changes."
+        />
         <Card>
-          <form
-            className="space-y-4"
-            onSubmit={(e) => {
-              e.preventDefault();
-              save.mutate();
-            }}
-          >
-            {storyFields}
-            <div className="flex justify-end gap-2">
-              <Link to="/journal">
-                <Button type="button" variant="ghost">
-                  Done
-                </Button>
-              </Link>
-              <Button type="submit" size="lg" disabled={save.isPending}>
-                {save.isPending ? 'Saving…' : 'Save changes'}
-              </Button>
-            </div>
-          </form>
-        </Card>
-
-        <div className="mt-4">
-          <JournalPhotos
-            entryId={editing.id}
-            photos={editing.photos}
-            editable
-            onChanged={invalidate}
+          <JournalComposer
+            key={editing.id}
+            source={editing}
+            save={(payload) =>
+              api<JournalEntry>(`/journal/${editing.id}`, { method: 'PUT', body: payload })
+            }
+            submitLabel="Save Changes"
+            submittingLabel="Saving…"
+            onDone={done('Your story is updated.')}
+            onCancel={leave}
           />
-        </div>
+        </Card>
       </div>
     );
   }
@@ -199,47 +121,6 @@ export default function JournalNew() {
         <div className="flex justify-center py-20">
           <Spinner />
         </div>
-      ) : created ? (
-        <>
-          <Card className="text-center">
-            <BookOpen className="mx-auto mb-3 text-forest-600" size={30} />
-            <h3 className="font-display text-xl font-bold text-charcoal">Your story is posted!</h3>
-            <p className="mt-2 text-muted">
-              It's live in the camp journal now — add some photos below if you'd like, or come back
-              and edit it any time.
-            </p>
-            {catches.length > 0 && (
-              <p className="mt-2 text-sm text-muted">
-                Want a photo on a particular fish?{' '}
-                <Link
-                  to={`/journal/new?entry_id=${created.id}`}
-                  className="font-semibold text-forest-700 underline"
-                >
-                  Edit your story
-                </Link>{' '}
-                and attach it to that catch.
-              </p>
-            )}
-          </Card>
-
-          <div className="mt-4">
-            <JournalPhotos
-              entryId={created.id}
-              photos={(mineQuery.data ?? []).find((e) => e.id === created.id)?.photos ?? []}
-              editable
-              onChanged={invalidate}
-            />
-          </div>
-
-          <div className="mt-5 flex justify-center gap-3">
-            <Link to="/my-bookings">
-              <Button variant="ghost">My Bookings</Button>
-            </Link>
-            <Link to="/journal">
-              <Button>Read the journal</Button>
-            </Link>
-          </div>
-        </>
       ) : eligible.length === 0 ? (
         <EmptyState
           icon={<Tent size={26} />}
@@ -270,20 +151,19 @@ export default function JournalNew() {
           <p className="mb-4 text-sm font-semibold text-forest-700">
             {formatRange(chosen.check_in, chosen.check_out)}
           </p>
-          <form
-            className="space-y-4"
-            onSubmit={(e) => {
-              e.preventDefault();
-              create.mutate();
-            }}
-          >
-            {storyFields}
-            <div className="flex justify-end">
-              <Button type="submit" size="lg" disabled={create.isPending}>
-                <Send size={16} /> {create.isPending ? 'Posting…' : 'Post Story'}
-              </Button>
-            </div>
-          </form>
+          <JournalComposer
+            key={chosen.booking_id}
+            save={(payload) =>
+              api<JournalEntry>('/journal', {
+                method: 'POST',
+                body: { booking_id: chosen.booking_id, ...payload },
+              })
+            }
+            submitLabel="Post Story"
+            submittingLabel="Posting…"
+            onDone={done('Your story is posted!')}
+            onCancel={leave}
+          />
         </Card>
       )}
     </div>

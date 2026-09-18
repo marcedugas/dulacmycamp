@@ -573,6 +573,17 @@ pub struct CatchInput {
     pub notes: Option<String>,
 }
 
+/// Most catch rows one entry may carry. Not a storage concern — a row is a
+/// few numbers — but past this the form stops being usable, and a log that
+/// long is a spreadsheet, not a memory. The web form enforces the same
+/// number while composing; this is what stops a direct API call.
+pub const MAX_CATCHES_PER_ENTRY: usize = 25;
+
+/// Most photos one entry may carry, gallery and per-catch combined. Photos
+/// are compressed on the way in (see [`crate::uploads`]), so this keeps a
+/// story page manageable rather than protecting the disk.
+pub const MAX_PHOTOS_PER_ENTRY: i64 = 20;
+
 /// A submitted catch after validation — the shape that actually reaches the
 /// database.
 #[derive(Debug, PartialEq)]
@@ -581,15 +592,23 @@ struct CleanCatch {
     species_id: Option<Uuid>,
     length_inches: Option<f64>,
     weight_lbs: Option<f64>,
-    quantity: i32,
+    /// `None` when the client didn't send one — which the web form no longer
+    /// does. [`write_catches`] then keeps an existing row's stored quantity
+    /// and gives a new row the column's 1, so older logs that recorded "3
+    /// redfish" aren't silently rewritten to 1 by an unrelated edit.
+    quantity: Option<i32>,
     notes: Option<String>,
 }
 
 fn clean_catches(catches: &[CatchInput]) -> ApiResult<Vec<CleanCatch>> {
+    if catches.len() > MAX_CATCHES_PER_ENTRY {
+        return Err(AppError::BadRequest(format!(
+            "A story can log up to {MAX_CATCHES_PER_ENTRY} catches."
+        )));
+    }
     let mut out = Vec::with_capacity(catches.len());
     for c in catches {
-        let quantity = c.quantity.unwrap_or(1);
-        if quantity < 1 {
+        if c.quantity.is_some_and(|q| q < 1) {
             return Err(AppError::BadRequest(
                 "A catch needs a quantity of at least 1.".into(),
             ));
@@ -608,7 +627,7 @@ fn clean_catches(catches: &[CatchInput]) -> ApiResult<Vec<CleanCatch>> {
             species_id: c.species_id,
             length_inches: c.length_inches,
             weight_lbs: c.weight_lbs,
-            quantity,
+            quantity: c.quantity,
             notes: c
                 .notes
                 .as_deref()
@@ -679,6 +698,10 @@ async fn write_catches(
         .execute(&mut **tx)
         .await?;
 
+    // `sort_order` is the row's position in the submitted list, exactly — the
+    // web form relies on this to match each staged catch photo to the row it
+    // was attached to (catch `sort_order == i` is submitted row `i`), so this
+    // must stay a plain index and never be compacted or reused otherwise.
     for (i, c) in catches.iter().enumerate() {
         let sort_order = i as i32;
         match c.id.filter(|id| keep.contains(id)) {
@@ -686,7 +709,7 @@ async fn write_catches(
                 sqlx::query(
                     "UPDATE journal_catches
                      SET species_id = $2, length_inches = $3, weight_lbs = $4,
-                         quantity = $5, notes = $6, sort_order = $7
+                         quantity = COALESCE($5, quantity), notes = $6, sort_order = $7
                      WHERE id = $1",
                 )
                 .bind(id)
@@ -703,7 +726,7 @@ async fn write_catches(
                 sqlx::query(
                     "INSERT INTO journal_catches
                         (journal_entry_id, species_id, length_inches, weight_lbs, quantity, notes, sort_order)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                     VALUES ($1, $2, $3, $4, COALESCE($5, 1), $6, $7)",
                 )
                 .bind(entry_id)
                 .bind(c.species_id)
@@ -957,9 +980,9 @@ async fn require_can_edit(state: &Shared, user: &User, entry_id: Uuid) -> ApiRes
 /// before. A catch photo is *not* also a gallery photo — the two sets are
 /// disjoint, so nothing is ever shown twice (see [`hydrate`]).
 ///
-/// There is no per-entry photo cap to interact with: none exists today, and
-/// this change does not invent one. The size and type limits that do exist
-/// are per-file and apply to both kinds identically.
+/// Refused once the entry holds [`MAX_PHOTOS_PER_ENTRY`] photos, both kinds
+/// counted together — checked before the file is read, so a photo over the
+/// cap is never decoded or written at all.
 pub async fn upload_photo(
     State(state): State<Shared>,
     AuthUser(user): AuthUser,
@@ -967,6 +990,13 @@ pub async fn upload_photo(
     mut multipart: Multipart,
 ) -> ApiResult<Json<PhotoRow>> {
     require_can_edit(&state, &user, id).await?;
+
+    let (count,): (i64,) =
+        sqlx::query_as("SELECT count(*) FROM journal_photos WHERE journal_entry_id = $1")
+            .bind(id)
+            .fetch_one(&state.db)
+            .await?;
+    require_photo_room(count)?;
 
     let mut url = None;
     let mut caption = None;
@@ -1026,6 +1056,18 @@ pub async fn upload_photo(
     .await?;
 
     Ok(Json(row))
+}
+
+/// A soft cap: two uploads racing past it at once can both land, leaving an
+/// entry one over. That is harmless for a limit about page length, and not
+/// worth a lock.
+fn require_photo_room(existing: i64) -> ApiResult<()> {
+    if existing >= MAX_PHOTOS_PER_ENTRY {
+        return Err(AppError::BadRequest(format!(
+            "A story can have up to {MAX_PHOTOS_PER_ENTRY} photos."
+        )));
+    }
+    Ok(())
 }
 
 /// `DELETE /api/journal/photos/{photo_id}` — removes the row and the file.
@@ -1370,18 +1412,42 @@ mod tests {
 
     // ─────────────── catch input ───────────────
 
-    #[test]
-    fn a_catch_defaults_to_a_quantity_of_one() {
-        let cleaned = clean_catches(&[CatchInput {
+    fn bare_catch() -> CatchInput {
+        CatchInput {
             id: None,
             species_id: None,
             length_inches: None,
             weight_lbs: None,
             quantity: None,
             notes: None,
-        }])
-        .unwrap();
-        assert_eq!(cleaned[0].quantity, 1);
+        }
+    }
+
+    /// The form no longer sends a quantity. Leaving it unset (rather than
+    /// defaulting to 1 here) is what lets an update keep a stored "3".
+    #[test]
+    fn an_omitted_quantity_stays_unset_for_the_database_to_resolve() {
+        let cleaned = clean_catches(&[bare_catch()]).unwrap();
+        assert_eq!(cleaned[0].quantity, None);
+    }
+
+    #[test]
+    fn a_log_may_hold_up_to_the_catch_cap_and_no_more() {
+        let at_cap: Vec<CatchInput> = (0..MAX_CATCHES_PER_ENTRY).map(|_| bare_catch()).collect();
+        assert_eq!(clean_catches(&at_cap).unwrap().len(), MAX_CATCHES_PER_ENTRY);
+
+        let over: Vec<CatchInput> = (0..=MAX_CATCHES_PER_ENTRY).map(|_| bare_catch()).collect();
+        assert!(matches!(clean_catches(&over), Err(AppError::BadRequest(_))));
+    }
+
+    #[test]
+    fn an_entry_takes_photos_until_the_cap_and_then_refuses() {
+        assert!(require_photo_room(0).is_ok());
+        assert!(require_photo_room(MAX_PHOTOS_PER_ENTRY - 1).is_ok());
+        assert!(matches!(
+            require_photo_room(MAX_PHOTOS_PER_ENTRY),
+            Err(AppError::BadRequest(_))
+        ));
     }
 
     #[test]
@@ -1457,7 +1523,7 @@ mod tests {
             species_id: None,
             length_inches: None,
             weight_lbs: None,
-            quantity: 1,
+            quantity: None,
             notes: None,
         }
     }
