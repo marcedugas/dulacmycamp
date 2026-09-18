@@ -12,6 +12,10 @@ axum = { version = "0.8.9", features = ["multipart"] }
 chrono = { version = "0.4.45", features = ["serde"] }
 chrono-tz = "0.10.4"
 dotenvy = "0.15.7"
+# Decode/resize/re-encode for upload compression (see `uploads.rs`). JPEG,
+# PNG and WebP only — the three types uploads accept — so no codec for a
+# format nothing can send is compiled in.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 jsonwebtoken = "9"
 rand = "0.8"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "http2", "charset"] }
@@ -32,3 +36,18 @@ lto = false
 codegen-units = 16
 # Do NOT set panic = "abort" — unwinding is required if a panic-catching
 # middleware layer is added later.
+
+# Image decoding and resizing in an unoptimised debug build runs 10-50x slower
+# — long enough for a local upload of a phone photo to feel hung. Optimise
+# just the codec crates so `cargo run` stays representative without slowing
+# the rest of the dev build.
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.image-webp]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3

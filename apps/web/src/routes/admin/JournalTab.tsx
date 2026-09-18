@@ -1,26 +1,16 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { format } from 'date-fns';
 import { toast } from 'sonner';
 import { Archive, ArchiveRestore, Pencil, Trash2, TriangleAlert } from 'lucide-react';
-import {
-  Button,
-  EmptyState,
-  Field,
-  Input,
-  JournalVisibilityBadge,
-  Modal,
-  Spinner,
-  Textarea,
-  cx,
-} from '../../components/ui';
-import { CatchLog, CatchSummary, catchPhotosOf, toCatchInputs } from '../../components/CatchLog';
-import { JournalPhotos } from '../../components/JournalPhotos';
-import { JournalVisibilityChoice } from '../../components/JournalVisibility';
+import { Button, EmptyState, JournalVisibilityBadge, Modal, Spinner, cx } from '../../components/ui';
+import { CatchSummary } from '../../components/CatchLog';
+import { JournalComposer } from '../../components/JournalComposer';
 import { api, ApiError } from '../../lib/api';
 import { useJournalAdmin } from '../../lib/queries';
 import { formatRange } from '../../lib/dates';
-import type { AdminJournalEntry, JournalCatchInput, JournalVisibility } from '../../lib/types';
+import { confirmDiscard } from '../../lib/useLeaveGuard';
+import type { AdminJournalEntry, JournalEntry } from '../../lib/types';
 
 const onError = (err: unknown) =>
   toast.error(err instanceof ApiError ? err.message : 'That action failed.');
@@ -46,19 +36,13 @@ export default function JournalTab() {
   const [editing, setEditing] = useState<AdminJournalEntry | null>(null);
   const [deleting, setDeleting] = useState<AdminJournalEntry | null>(null);
 
-  const [title, setTitle] = useState('');
-  const [body, setBody] = useState('');
-  const [visibility, setVisibility] = useState<JournalVisibility>('family');
-  const [catches, setCatches] = useState<JournalCatchInput[]>([]);
-
-  // Seed the editor whenever a different entry is opened.
-  useEffect(() => {
-    if (!editing) return;
-    setTitle(editing.title);
-    setBody(editing.body);
-    setVisibility(editing.visibility);
-    setCatches(toCatchInputs(editing.catches));
-  }, [editing]);
+  // Whether closing the editor now would throw away unsaved work. A ref, so
+  // the modal's close handler reads it live rather than a render behind — a
+  // quick Escape straight after typing must still ask.
+  const editorDirty = useRef(false);
+  const trackDirty = useCallback((dirty: boolean) => {
+    editorDirty.current = dirty;
+  }, []);
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: ['journal-admin'] });
@@ -66,24 +50,10 @@ export default function JournalTab() {
     void queryClient.invalidateQueries({ queryKey: ['journal-mine'] });
   };
 
-  const save = useMutation({
-    mutationFn: (id: string) =>
-      api(`/journal/${id}`, {
-        method: 'PUT',
-        body: {
-          title: title.trim(),
-          body: body.trim(),
-          visibility,
-          catches: catches.map((c) => ({ ...c, notes: c.notes?.trim() || null })),
-        },
-      }),
-    onSuccess: () => {
-      toast.success('Entry updated.');
-      setEditing(null);
-      invalidate();
-    },
-    onError,
-  });
+  const closeEditor = () => {
+    setEditing(null);
+    editorDirty.current = false;
+  };
 
   const archive = useMutation({
     mutationFn: (id: string) => api(`/journal/${id}/archive`, { method: 'PUT' }),
@@ -229,10 +199,14 @@ export default function JournalTab() {
         </div>
       )}
 
+      {/* The ✕, Escape and a backdrop click are easy to hit by accident, so
+          they ask first when there's work to lose. The form's own Cancel is
+          deliberate and doesn't. */}
       <Modal
         open={Boolean(editing)}
-        onClose={() => setEditing(null)}
+        onClose={() => (!editorDirty.current || confirmDiscard()) && closeEditor()}
         title={`Edit: ${editing?.title ?? ''}`}
+        size="lg"
       >
         {editing && (
           <div className="space-y-4">
@@ -240,40 +214,25 @@ export default function JournalTab() {
               <strong className="text-charcoal">{editing.guest_name ?? editing.guest_email}</strong>{' '}
               · {formatRange(editing.check_in, editing.check_out)}
             </p>
-
-            <Field label="Title">
-              <Input value={title} onChange={(e) => setTitle(e.target.value)} />
-            </Field>
-            <Field label="Story">
-              <Textarea rows={8} value={body} onChange={(e) => setBody(e.target.value)} />
-            </Field>
-            <CatchLog
-              catches={catches}
-              onChange={setCatches}
-              entryId={editing.id}
-              photos={catchPhotosOf(editing.catches)}
-              onPhotosChanged={invalidate}
+            <JournalComposer
+              key={editing.id}
+              source={editing}
+              save={(payload) =>
+                api<JournalEntry>(`/journal/${editing.id}`, { method: 'PUT', body: payload })
+              }
+              submitLabel="Save Changes"
+              submittingLabel="Saving…"
+              onDone={({ skippedPhotos }) => {
+                toast.success(
+                  skippedPhotos > 0 ? 'Entry updated — some photos weren\'t attached.' : 'Entry updated.',
+                );
+                closeEditor();
+                invalidate();
+              }}
+              onCancel={closeEditor}
+              onDirtyChange={trackDirty}
+              visibilityName="admin-journal-visibility"
             />
-            <JournalVisibilityChoice
-              value={visibility}
-              onChange={setVisibility}
-              name="admin-journal-visibility"
-            />
-            <JournalPhotos
-              entryId={editing.id}
-              photos={editing.photos}
-              editable
-              onChanged={invalidate}
-            />
-
-            <div className="flex justify-end gap-2">
-              <Button variant="ghost" onClick={() => setEditing(null)}>
-                Cancel
-              </Button>
-              <Button disabled={save.isPending} onClick={() => save.mutate(editing.id)}>
-                {save.isPending ? 'Saving…' : 'Save changes'}
-              </Button>
-            </div>
           </div>
         )}
       </Modal>
