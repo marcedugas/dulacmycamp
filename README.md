@@ -90,6 +90,7 @@ See [`.env.example`](.env.example) for the annotated list. The ones that matter:
 |---|---|---|
 | `DATABASE_URL` | **yes** | Postgres connection string |
 | `JWT_SECRET` | **yes** | `openssl rand -hex 32`; rotating it signs everyone out |
+| `PII_ENCRYPTION_KEY` | prod | `openssl rand -hex 32`; encrypts guests' phone + mailing address. API won't start in production without it; losing it makes those fields unrecoverable. See DEPLOYMENT.md |
 | `RESEND_API_KEY` | prod | Unset ⇒ emails are logged, not sent |
 | `EMAIL_FROM_ADDRESS` | prod | Must be a Resend-verified domain |
 | `FRONTEND_URL` | prod | CORS origin + links inside emails |

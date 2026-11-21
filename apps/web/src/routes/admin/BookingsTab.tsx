@@ -29,6 +29,7 @@ import {
 } from '../../components/ui';
 import { ReservationVisibility } from '../../components/ReservationVisibility';
 import { api, ApiError } from '../../lib/api';
+import { WATERCRAFT_LABELS, WATERCRAFT_OPTIONS } from '../../lib/contact';
 import { useAdminCheckouts, useBookings, useCalendarData, useUsers } from '../../lib/queries';
 import { buildIndex } from '../../components/CampCalendar';
 import {
@@ -45,7 +46,54 @@ import type {
   BookingStatus,
   BookingWriteResponse,
   DeleteSummary,
+  WatercraftKind,
 } from '../../lib/types';
+
+/** "Not provided" for anything the applicant didn't give (older requests). */
+const NP = <span className="text-muted">Not provided</span>;
+
+/** The applicant's private details — admin/owner eyes only (see the API's `applicant`). */
+function ApplicantDetails({ b }: { b: Booking }) {
+  const a = b.applicant;
+  const place = [a?.home_city, a?.home_state].filter(Boolean).join(', ');
+  const craft = a?.watercraft ? WATERCRAFT_LABELS[a.watercraft] : null;
+  return (
+    <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 rounded bg-cream-dark/60 px-3 py-2">
+      <dt className="text-muted">Phone</dt>
+      <dd>
+        {a?.phone ? (
+          <a href={`tel:${a.phone}`} className="font-semibold text-forest-700 underline">
+            {a.phone}
+          </a>
+        ) : (
+          NP
+        )}
+      </dd>
+      <dt className="text-muted">From</dt>
+      <dd>{place || NP}</dd>
+      <dt className="text-muted">Mailing address</dt>
+      <dd className="whitespace-pre-line">{a?.mailing_address || NP}</dd>
+      <dt className="text-muted">Referral</dt>
+      <dd>
+        {a?.referral || NP}
+        {a?.no_referral && <NoReferralBadge />}
+      </dd>
+      <dt className="text-muted">Watercraft</dt>
+      <dd>
+        {craft ?? NP}
+        {a?.watercraft_details && ` — ${a.watercraft_details}`}
+      </dd>
+    </dl>
+  );
+}
+
+function NoReferralBadge() {
+  return (
+    <span className="ml-1.5 inline-flex rounded-full border border-sand bg-cream-dark px-2 py-0.5 text-[11px] font-semibold text-charcoal">
+      No referral
+    </span>
+  );
+}
 
 const STATUSES: (BookingStatus | 'all')[] = ['all', 'pending', 'approved', 'denied', 'cancelled'];
 
@@ -306,6 +354,10 @@ function EditBookingModal({
   const [checkOut, setCheckOut] = useState(booking.check_out);
   const [adults, setAdults] = useState(booking.guest_count_adults ?? 1);
   const [kids, setKids] = useState(booking.guest_count_kids ?? 0);
+  // Stay-level answers an owner may correct. Phone and address stay read-only.
+  const [referral, setReferral] = useState(booking.applicant?.referral ?? '');
+  const [watercraft, setWatercraft] = useState<WatercraftKind | ''>(booking.applicant?.watercraft ?? '');
+  const [craftDetails, setCraftDetails] = useState(booking.applicant?.watercraft_details ?? '');
 
   const { bookings, blackouts, events, occupancy } = useCalendarData();
 
@@ -314,7 +366,10 @@ function EditBookingModal({
     checkIn === booking.check_in &&
     checkOut === booking.check_out &&
     adults === (booking.guest_count_adults ?? 1) &&
-    kids === (booking.guest_count_kids ?? 0);
+    kids === (booking.guest_count_kids ?? 0) &&
+    referral === (booking.applicant?.referral ?? '') &&
+    watercraft === (booking.applicant?.watercraft ?? '') &&
+    craftDetails === (booking.applicant?.watercraft_details ?? '');
 
   /**
    * What the proposed nights already hold — the same read of the same index
@@ -353,6 +408,8 @@ function EditBookingModal({
           check_out: checkOut,
           guest_count_adults: adults,
           guest_count_kids: kids,
+          referral,
+          ...(watercraft ? { watercraft, watercraft_details: craftDetails } : {}),
         },
       }),
     onSuccess: (res) => {
@@ -448,6 +505,37 @@ function EditBookingModal({
             <CountInput min={0} max={30} value={kids} onChange={setKids} />
           </Field>
         </div>
+
+        <Field label="Referral">
+          <Input maxLength={300} value={referral} onChange={(e) => setReferral(e.target.value)} />
+        </Field>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="Watercraft">
+            <select
+              className="w-full rounded-lg border border-sand bg-white px-3 py-2.5 text-sm text-charcoal"
+              value={watercraft}
+              onChange={(e) => setWatercraft(e.target.value as WatercraftKind | '')}
+            >
+              <option value="">Not provided</option>
+              {WATERCRAFT_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Watercraft details">
+            <Input
+              maxLength={300}
+              disabled={!watercraft || watercraft === 'none'}
+              value={craftDetails}
+              onChange={(e) => setCraftDetails(e.target.value)}
+            />
+          </Field>
+        </div>
+        <p className="text-xs text-muted">
+          Phone and mailing address are the applicant&apos;s own and can&apos;t be edited here.
+        </p>
 
         <p className="text-xs text-muted">
           {unchanged
@@ -649,6 +737,7 @@ export default function BookingsTab() {
                     <td className="px-3 py-2.5">
                       <div className="flex flex-wrap items-center gap-1.5">
                         <StatusBadge status={b.status} />
+                        {b.applicant?.no_referral && <NoReferralBadge />}
                         {b.checked_out && (
                           <span
                             title={b.checkout_notes ? 'Checked out — has a note' : 'Checked out'}
@@ -780,6 +869,7 @@ export default function BookingsTab() {
             {details.other_requests && (
               <p className="rounded bg-cream-dark/60 px-3 py-2">{details.other_requests}</p>
             )}
+            <ApplicantDetails b={details} />
             {details.approved_by && (
               <p className="text-muted">
                 {details.status} by {details.approved_by}

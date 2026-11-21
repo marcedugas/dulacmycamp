@@ -7,15 +7,34 @@ import { CheckCircle2, Fish, Info, Lock, TriangleAlert, Users } from 'lucide-rea
 import { buildIndex } from '../components/CampCalendar';
 import { Button, Card, CountInput, Field, Input, PageHeader, Textarea, cx } from '../components/ui';
 import { ReservationVisibility } from '../components/ReservationVisibility';
+import { ContactFields, contactFromUser, type ContactValues } from '../components/ContactFields';
 import { api, ApiError } from '../lib/api';
+import { useAuth } from '../lib/auth';
+import { WATERCRAFT_OPTIONS, phoneError } from '../lib/contact';
 import { useCalendarData } from '../lib/queries';
 import { daysInclusive, formatRange, nightCount, parseDay, pluralNights, toKey } from '../lib/dates';
-import type { BookingWriteResponse } from '../lib/types';
+import type { BookingWriteResponse, WatercraftKind } from '../lib/types';
 
 export default function BookPage() {
   const [params] = useSearchParams();
   const queryClient = useQueryClient();
   const { bookings, blackouts, events, occupancy, capacityLimit } = useCalendarData();
+  const { user, refresh } = useAuth();
+
+  // Guests must tell us a little about themselves; family and admin accounts
+  // are known to us, so for them everything below is optional. The server
+  // enforces the same rule — this only makes the form say it.
+  const mustAnswer = user?.role === 'guest';
+  const [contact, setContact] = useState<ContactValues>(() => contactFromUser(user));
+  // Everything person-level already on file: show it collapsed, not asked again.
+  const onFile = Boolean(user?.phone && user.home_city && user.home_state);
+  const [editingContact, setEditingContact] = useState(!onFile);
+  const [referral, setReferral] = useState('');
+  const [watercraft, setWatercraft] = useState<WatercraftKind | null>(null);
+  const [craftDetails, setCraftDetails] = useState('');
+  // Honeypot — see the hidden input below.
+  const [fax, setFax] = useState('');
+  const [showErrors, setShowErrors] = useState(false);
 
   const today = toKey(new Date());
   const [checkIn, setCheckIn] = useState(params.get('from') ?? today);
@@ -68,8 +87,29 @@ export default function BookPage() {
   const overCapacity = (conflicts?.totalAdults ?? 0) > capacityLimit;
   const atCapacity = (conflicts?.totalAdults ?? 0) === capacityLimit;
 
+  const errors = {
+    phone:
+      phoneError(contact.phone) ??
+      (mustAnswer && !contact.phone.trim() ? 'Please enter a phone number we can reach you at.' : null),
+    home_city: mustAnswer && !contact.home_city.trim() ? 'Please enter your city.' : null,
+    home_state: mustAnswer && !contact.home_state.trim() ? 'Please enter your state.' : null,
+    referral:
+      mustAnswer && !referral.trim()
+        ? 'Please tell us who referred you. If nobody did, type "none".'
+        : null,
+    watercraft:
+      mustAnswer && !watercraft ? 'Please choose one. Pick "None" if you aren\'t bringing any.' : null,
+  };
+  const hasErrors = Object.values(errors).some(Boolean);
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (hasErrors) {
+      setShowErrors(true);
+      setEditingContact(true);
+      toast.error('Please fill in the highlighted questions.');
+      return;
+    }
     setBusy(true);
     try {
       const res = await api<BookingWriteResponse>('/bookings', {
@@ -82,8 +122,19 @@ export default function BookPage() {
           has_pets: pets,
           other_requests: requests.trim() || null,
           is_private: isPrivate,
+          phone: contact.phone.trim() || null,
+          home_city: contact.home_city.trim() || null,
+          home_state: contact.home_state.trim() || null,
+          mailing_address: contact.mailing_address.trim() || null,
+          referral: referral.trim() || null,
+          watercraft,
+          watercraft_details: watercraft && watercraft !== 'none' ? craftDetails.trim() || null : null,
+          fax,
         },
       });
+      // The booking saved their contact info on their profile; pull it so the
+      // next request is prefilled.
+      void refresh();
       setDone(res);
       void queryClient.invalidateQueries({ queryKey: ['bookings'] });
       toast.success('Request submitted!');
@@ -254,6 +305,110 @@ export default function BookPage() {
             />
           </Field>
 
+          {/* ── About you ── */}
+          <fieldset className="space-y-4 rounded-lg border border-sand p-4">
+            <legend className="px-1 text-sm font-bold text-charcoal">About you</legend>
+            {onFile && !editingContact ? (
+              <p className="text-sm text-muted">
+                Contact info on file for {user?.home_city}, {user?.home_state}.{' '}
+                <button
+                  type="button"
+                  className="font-semibold text-forest-700 underline"
+                  onClick={() => setEditingContact(true)}
+                >
+                  (edit)
+                </button>
+              </p>
+            ) : (
+              <ContactFields
+                values={contact}
+                onChange={setContact}
+                required={mustAnswer}
+                errors={
+                  showErrors
+                    ? { phone: errors.phone, home_city: errors.home_city, home_state: errors.home_state }
+                    : { phone: phoneError(contact.phone) }
+                }
+              />
+            )}
+          </fieldset>
+
+          {/* ── About your stay ── */}
+          <fieldset className="space-y-4 rounded-lg border border-sand p-4">
+            <legend className="px-1 text-sm font-bold text-charcoal">About your stay</legend>
+            <Field
+              label={`Who referred you, or how did you hear about the camp?${mustAnswer ? '' : ' (optional)'}`}
+            >
+              <Input
+                maxLength={300}
+                value={referral}
+                onChange={(e) => setReferral(e.target.value)}
+                placeholder="A name, a friend of the family, Google…"
+              />
+              {showErrors && errors.referral && (
+                <p className="mt-1 text-sm text-clay">{errors.referral}</p>
+              )}
+            </Field>
+
+            <div role="radiogroup" aria-label="Are you bringing a boat or other watercraft?">
+              <p className="mb-1.5 text-sm font-semibold text-charcoal">
+                Are you bringing a boat or other watercraft?{mustAnswer ? '' : ' (optional)'}
+              </p>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                {WATERCRAFT_OPTIONS.map((o) => (
+                  <label
+                    key={o.value}
+                    className={cx(
+                      'flex min-h-12 cursor-pointer items-center justify-center rounded-lg border px-3 py-2 text-center text-sm font-semibold transition',
+                      watercraft === o.value
+                        ? 'border-forest-600 bg-forest-50 text-forest-800'
+                        : 'border-sand bg-white text-charcoal hover:bg-cream-dark',
+                    )}
+                  >
+                    <input
+                      type="radio"
+                      name="watercraft"
+                      value={o.value}
+                      checked={watercraft === o.value}
+                      onChange={() => setWatercraft(o.value)}
+                      className="sr-only"
+                    />
+                    {o.label}
+                  </label>
+                ))}
+              </div>
+              {showErrors && errors.watercraft && (
+                <p className="mt-1 text-sm text-clay">{errors.watercraft}</p>
+              )}
+            </div>
+
+            {watercraft && watercraft !== 'none' && (
+              <Field label="Tell us about it" hint='For example "18 ft bay boat, trailer". Helpful, not required.'>
+                <Input
+                  maxLength={300}
+                  value={craftDetails}
+                  onChange={(e) => setCraftDetails(e.target.value)}
+                />
+              </Field>
+            )}
+          </fieldset>
+
+          {/* Honeypot: invisible and unreachable for people, irresistible to
+              form-filling bots. Anything typed here is silently refused. */}
+          <div aria-hidden="true" className="absolute -left-[9999px] h-0 w-0 overflow-hidden">
+            <label>
+              Fax
+              <input
+                type="text"
+                name="fax"
+                tabIndex={-1}
+                autoComplete="off"
+                value={fax}
+                onChange={(e) => setFax(e.target.value)}
+              />
+            </label>
+          </div>
+
           {/* Last thing before the submit button on purpose: whatever else a
               booker skims past, they pass through this on the way out. */}
           <ReservationVisibility value={isPrivate} onChange={setIsPrivate} />
@@ -266,6 +421,15 @@ export default function BookPage() {
           <Button type="submit" size="lg" className="w-full" disabled={busy || !valid || blocked}>
             {busy ? 'Submitting…' : 'Submit Booking Request'}
           </Button>
+
+          <p className="text-xs leading-relaxed text-muted">
+            Why we ask: so the camp owners can contact you about your stay and know who is coming.
+            Only the camp owners can see this. We never sell it or share it with anyone else. You
+            can ask us to delete it any time.{' '}
+            <Link to="/privacy" className="font-semibold text-forest-700 underline">
+              Privacy
+            </Link>
+          </p>
         </form>
       </Card>
     </div>

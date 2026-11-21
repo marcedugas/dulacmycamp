@@ -51,6 +51,17 @@ export default function UsersTab() {
       toast.error(err instanceof ApiError ? err.message : 'Could not change that owner flag.'),
   });
 
+  const clearContact = useMutation({
+    mutationFn: (id: string) => api(`/users/${id}/contact`, { method: 'DELETE' }),
+    onSuccess: () => {
+      toast.success('Contact info cleared.');
+      void queryClient.invalidateQueries({ queryKey: ['users'] });
+      void queryClient.invalidateQueries({ queryKey: ['bookings'] });
+    },
+    onError: (err) =>
+      toast.error(err instanceof ApiError ? err.message : 'Could not clear that contact info.'),
+  });
+
   const setBlocked = useMutation({
     mutationFn: ({ id, blocked }: { id: string; blocked: boolean }) =>
       api(`/users/${id}/${blocked ? 'block' : 'unblock'}`, { method: 'PUT' }),
@@ -142,7 +153,33 @@ export default function UsersTab() {
                     </p>
                     {u.relationship && <p className="text-xs text-muted">{u.relationship}</p>}
                   </td>
-                  <td className="px-3 py-2.5 text-muted">{u.email}</td>
+                  <td className="px-3 py-2.5 text-muted">
+                    {u.email}
+                    {(u.phone || u.home_city || u.mailing_address) && (
+                      <div className="mt-1 text-xs">
+                        {u.phone && (
+                          <a href={`tel:${u.phone}`} className="font-semibold text-forest-700 underline">
+                            {u.phone}
+                          </a>
+                        )}
+                        {(u.home_city || u.home_state) && (
+                          <span> · {[u.home_city, u.home_state].filter(Boolean).join(', ')}</span>
+                        )}
+                        {u.mailing_address && <div className="whitespace-pre-line">{u.mailing_address}</div>}
+                        <button
+                          type="button"
+                          className="mt-0.5 block text-clay underline"
+                          disabled={clearContact.isPending}
+                          onClick={() => {
+                            if (window.confirm('Clear this person\'s phone, address, city and state?'))
+                              clearContact.mutate(u.id);
+                          }}
+                        >
+                          Clear contact info
+                        </button>
+                      </div>
+                    )}
+                  </td>
                   <td className="px-3 py-2.5">
                     <div className="flex flex-wrap items-center gap-1.5">
                       <span

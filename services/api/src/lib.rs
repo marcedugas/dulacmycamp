@@ -10,6 +10,7 @@ pub mod bookings;
 pub mod checkin_info;
 pub mod checklist;
 pub mod checkout;
+pub mod contact;
 pub mod content_access;
 pub mod email;
 pub mod email_templates;
@@ -20,6 +21,7 @@ pub mod journal;
 pub mod my_stay;
 pub mod notifications;
 pub mod password;
+pub mod pii;
 pub mod rate_limit;
 pub mod site_content;
 pub mod solunar;
@@ -83,6 +85,28 @@ pub struct Config {
     /// this path (or on a Railway service with no volume attached) does not
     /// survive one.
     pub upload_dir: String,
+    /// AES-256 key for `pii::Sealed` (phone, mailing address). Never logged.
+    pub pii_key: PiiKey,
+}
+
+/// The key, with a Debug that cannot print it (`Config` derives Debug).
+#[derive(Clone)]
+pub struct PiiKey(pub [u8; 32]);
+
+impl std::fmt::Debug for PiiKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PiiKey(..)")
+    }
+}
+
+/// Whether this process is a local dev run — the only place a missing
+/// `PII_ENCRYPTION_KEY` is tolerated. Anything pointed at a non-localhost
+/// frontend, or running on Railway, is production.
+fn is_local_dev(frontend_url: &str) -> bool {
+    let local = ["http://localhost", "http://127.0.0.1"]
+        .iter()
+        .any(|p| frontend_url.starts_with(p));
+    local && std::env::var_os("RAILWAY_ENVIRONMENT").is_none()
 }
 
 impl Config {
@@ -95,7 +119,23 @@ impl Config {
         fn opt(key: &str) -> Option<String> {
             std::env::var(key).ok().filter(|v| !v.trim().is_empty())
         }
+        let frontend_url = opt("FRONTEND_URL").unwrap_or_else(|| "http://localhost:5173".into());
+        let pii_key = match opt("PII_ENCRYPTION_KEY") {
+            Some(k) => PiiKey(pii::parse_key(&k)?),
+            None if is_local_dev(&frontend_url) => {
+                tracing::warn!(
+                    "PII_ENCRYPTION_KEY is unset: using the public LOCAL DEV key. Phone and \
+                     address are NOT protected. This is only allowed for local development."
+                );
+                PiiKey(pii::dev_key())
+            }
+            None => anyhow::bail!(
+                "PII_ENCRYPTION_KEY is required outside local development \
+                 (generate one with: openssl rand -hex 32)"
+            ),
+        };
         Ok(Self {
+            pii_key,
             database_url: opt("DATABASE_URL")
                 .ok_or_else(|| anyhow::anyhow!("DATABASE_URL is required"))?,
             jwt_secret: opt("JWT_SECRET")
@@ -103,7 +143,7 @@ impl Config {
             resend_api_key: opt("RESEND_API_KEY"),
             email_from: opt("EMAIL_FROM_ADDRESS")
                 .unwrap_or_else(|| "Dulac My Camp <no-reply@dulacmycamp.com>".into()),
-            frontend_url: opt("FRONTEND_URL").unwrap_or_else(|| "http://localhost:5173".into()),
+            frontend_url,
             legacy_frontend_url: opt("LEGACY_FRONTEND_URL"),
             api_base_url: opt("API_BASE_URL").unwrap_or_else(|| "http://localhost:8080".into()),
             owner_email: opt("OWNER_EMAIL"),
@@ -169,6 +209,8 @@ pub async fn build_state(cfg: Config) -> anyhow::Result<Shared> {
         .acquire_timeout(Duration::from_secs(10))
         .connect(&cfg.database_url)
         .await?;
+
+    pii::init(cfg.pii_key.0);
 
     sqlx::migrate!("./migrations").run(&db).await?;
 
@@ -243,6 +285,13 @@ pub fn router(state: Shared) -> Router {
         .route("/admin/bookings", post(bookings::admin_create))
         // ── users ──
         .route("/users/me", get(users::get_me).put(users::update_me))
+        // Contact info (phone, city/state, mailing address): saved and
+        // deleted separately from the rest of the profile. See `contact`.
+        .route(
+            "/users/me/contact",
+            put(users::update_my_contact).delete(users::clear_my_contact),
+        )
+        .route("/users/{id}/contact", delete(users::clear_contact_admin))
         .route("/users", get(users::list_all))
         .route("/users/{id}/role", put(users::update_role))
         .route("/users/{id}/owner", put(users::update_owner))

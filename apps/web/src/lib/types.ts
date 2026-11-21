@@ -37,7 +37,12 @@ export interface User {
   id: string;
   email: string;
   full_name: string | null;
+  /** Contact info: private. Present only in the account's own responses and
+   *  the admin ones. Encrypted at rest; the API decrypts for these views. */
   phone: string | null;
+  home_city: string | null;
+  home_state: string | null;
+  mailing_address: string | null;
   relationship: string | null;
   boat_info: string | null;
   notes: string | null;
@@ -84,6 +89,25 @@ export interface UserWithStats extends User {
  * that the camp is taken, never by whom.
  */
 
+export type WatercraftKind = 'none' | 'boat' | 'kayak_canoe' | 'other';
+
+/**
+ * Who is asking and what they are bringing. Present ONLY for the applicant
+ * themselves and for admins/owners — never on the public calendar, other
+ * guests' views or family accounts. Fields are null when not provided.
+ */
+export interface ApplicantInfo {
+  phone: string | null;
+  home_city: string | null;
+  home_state: string | null;
+  mailing_address: string | null;
+  referral: string | null;
+  /** True for a blank-ish referral ("none", "n/a", empty). */
+  no_referral: boolean;
+  watercraft: WatercraftKind | null;
+  watercraft_details: string | null;
+}
+
 export interface Booking {
   id: string;
   check_in: string;
@@ -116,6 +140,7 @@ export interface Booking {
    *  people's calendars. Same visibility as guest_name etc.: present for the
    *  booking's owner and admins, which is everyone who can change it. */
   is_private?: boolean;
+  applicant?: ApplicantInfo;
   /** Present only when the calendar may name this stay's booker: a signed-in
    *  viewer, an approved booking, and `is_private` false. Its presence is the
    *  whole signal — absent means render the stay anonymously, exactly as every
