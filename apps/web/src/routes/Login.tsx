@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import { ArrowLeft, Fish } from 'lucide-react';
 import { api, ApiError } from '../lib/api';
 import { useAuth } from '../lib/auth';
+import { clearReturnTo, readReturnTo, safeReturnPath } from '../lib/returnTo';
 import type { AuthResponse } from '../lib/types';
 import { Button, Card, Field, Input } from '../components/ui';
 
@@ -26,7 +27,10 @@ export default function Login() {
   const { signIn } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
-  const returnTo = (location.state as { from?: string } | null)?.from ?? '/my-bookings';
+  // Same-tab target from router state; otherwise the stored one (a code opened
+  // in a new tab from the email app). Both are re-checked: same-site relative
+  // paths only. Evaluated at sign-in time so a stale value can't linger.
+  const stateFrom = safeReturnPath((location.state as { from?: string } | null)?.from);
 
   const requestCode = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -46,8 +50,11 @@ export default function Login() {
   const arrive = (res: AuthResponse) => {
     signIn(res);
     toast.success(`Welcome${res.user.full_name ? `, ${res.user.full_name}` : ''}!`);
-    // Nudge first-time guests to fill in their profile.
-    navigate(res.user.full_name ? returnTo : '/profile', { replace: true });
+    // Back to wherever they were going (e.g. the booking form with their
+    // dates); otherwise the usual landing. Nobody is detoured to the profile.
+    const target = stateFrom ?? readReturnTo() ?? '/my-bookings';
+    clearReturnTo();
+    navigate(target, { replace: true });
   };
 
   const loginWithPassword = async (e: React.FormEvent) => {

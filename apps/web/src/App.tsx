@@ -3,7 +3,9 @@ import type { ReactNode } from 'react';
 import Nav from './components/Nav';
 import Footer from './components/Footer';
 import { Spinner } from './components/ui';
+import { useEffect } from 'react';
 import { useAuth } from './lib/auth';
+import { saveReturnTo } from './lib/returnTo';
 import Landing from './routes/Landing';
 import CalendarPage from './routes/CalendarPage';
 import ForecastPage from './routes/ForecastPage';
@@ -19,6 +21,13 @@ import JournalNew from './routes/JournalNew';
 import MyStay from './routes/MyStay';
 import AdminPanel from './routes/admin/AdminPanel';
 
+/** Remembers where a signed-out visitor was headed (router state for this
+ *  tab, storage for the email-app round trip), then sends them to /login. */
+function BounceToLogin({ from }: { from: string }) {
+  useEffect(() => saveReturnTo(from), [from]);
+  return <Navigate to="/login" replace state={{ from }} />;
+}
+
 /** Sends signed-out visitors to /login, remembering where they were headed. */
 function RequireAuth({ children, adminOnly }: { children: ReactNode; adminOnly?: boolean }) {
   const { user, loading, isAdmin } = useAuth();
@@ -32,7 +41,7 @@ function RequireAuth({ children, adminOnly }: { children: ReactNode; adminOnly?:
     );
   }
   if (!user) {
-    return <Navigate to="/login" replace state={{ from: location.pathname + location.search }} />;
+    return <BounceToLogin from={location.pathname + location.search} />;
   }
   if (adminOnly && !isAdmin) return <Navigate to="/" replace />;
 

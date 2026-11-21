@@ -764,11 +764,12 @@ pub async fn create_booking_for(
         .contact
         .sealed_address()
         .map_err(AppError::Internal)?;
-    if !applicant.contact.is_empty() {
+    if !applicant.contact.is_empty() || applicant.full_name.is_some() {
         sqlx::query(
             "UPDATE users SET phone = COALESCE($2, phone), home_city = COALESCE($3, home_city),
                               home_state = COALESCE($4, home_state),
-                              mailing_address = COALESCE($5, mailing_address)
+                              mailing_address = COALESCE($5, mailing_address),
+                              full_name = COALESCE($6, full_name)
              WHERE id = $1",
         )
         .bind(user.id)
@@ -776,6 +777,7 @@ pub async fn create_booking_for(
         .bind(&applicant.contact.home_city)
         .bind(&applicant.contact.home_state)
         .bind(&sealed_address)
+        .bind(&applicant.full_name)
         .execute(&mut *tx)
         .await?;
     }
@@ -812,7 +814,17 @@ pub async fn create_booking_for(
     tx.commit().await?;
 
     // ── notifications ──
-    let guest_name = user.display_name();
+    // The name just saved, not the stale one on `user` — a brand-new guest
+    // would otherwise appear in the owner's email as their email address.
+    let effective_name = applicant
+        .full_name
+        .clone()
+        .or_else(|| user.full_name.clone());
+    let guest_name = effective_name
+        .as_deref()
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or(&user.email)
+        .to_string();
     let approve_url = format!("{}/api/bookings/approve/{token}", api_url(state));
     let deny_url = format!("{}/api/bookings/deny/{token}", api_url(state));
 
@@ -861,7 +873,7 @@ pub async fn create_booking_for(
 
     let row = BookingRow {
         booking,
-        guest_name: user.full_name.clone(),
+        guest_name: effective_name,
         guest_email: user.email.clone(),
         checked_out: false,
         checkout_notes: None,

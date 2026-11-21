@@ -152,7 +152,7 @@ function ContactSection() {
         </Link>
       </p>
       <form onSubmit={save} className="space-y-4">
-        <ContactFields values={values} onChange={setValues} errors={{ phone: bad }} />
+        <ContactFields values={values} onChange={setValues} errors={{ phone: bad }} stayHint />
         <div className="flex flex-wrap gap-2">
           <Button type="submit" disabled={busy || Boolean(bad)}>
             {busy ? 'Saving…' : 'Save contact info'}

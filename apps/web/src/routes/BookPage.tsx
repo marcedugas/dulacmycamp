@@ -26,22 +26,39 @@ export default function BookPage() {
   // enforces the same rule — this only makes the form say it.
   const mustAnswer = user?.role === 'guest';
   const [contact, setContact] = useState<ContactValues>(() => contactFromUser(user));
+  const [fullName, setFullName] = useState(user?.full_name ?? '');
   // Everything person-level already on file: show it collapsed, not asked again.
-  const onFile = Boolean(user?.phone && user.home_city && user.home_state);
+  const onFile = Boolean(user?.phone && user.home_city && user.home_state && user.full_name?.trim());
   const [editingContact, setEditingContact] = useState(!onFile);
   const [referral, setReferral] = useState('');
   const [watercraft, setWatercraft] = useState<WatercraftKind | null>(null);
-  const [craftDetails, setCraftDetails] = useState('');
+  // A returning guest's saved boat info prefills this (the profile field itself
+  // is untouched). Only sent when a watercraft other than "none" is chosen.
+  const [craftDetails, setCraftDetails] = useState(user?.boat_info ?? '');
   // Honeypot — see the hidden input below.
   const [fax, setFax] = useState('');
   const [showErrors, setShowErrors] = useState(false);
 
   const today = toKey(new Date());
-  const [checkIn, setCheckIn] = useState(params.get('from') ?? today);
-  const [checkOut, setCheckOut] = useState(params.get('to') ?? toKey(addDays(new Date(), 2)));
-  const [adults, setAdults] = useState(2);
-  const [kids, setKids] = useState(0);
-  const [pets, setPets] = useState(false);
+  // Dates restored from the URL (Book Now → login → back here) are checked the
+  // way the form checks them: real, not in the past, check-out after check-in.
+  // Anything off falls back to the plain defaults rather than erroring.
+  const restored = useMemo(() => {
+    const from = params.get('from');
+    const to = params.get('to');
+    const ok = (v: string | null): v is string => !!v && /^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(Date.parse(v));
+    if (ok(from) && ok(to) && from >= today && to > from) return { from, to };
+    return null;
+  }, [params, today]);
+  const count = (key: string, min: number, fallback: number) => {
+    const n = Number(params.get(key));
+    return Number.isInteger(n) && n >= min && n <= 30 ? n : fallback;
+  };
+  const [checkIn, setCheckIn] = useState(restored?.from ?? today);
+  const [checkOut, setCheckOut] = useState(restored?.to ?? toKey(addDays(new Date(), 2)));
+  const [adults, setAdults] = useState(() => count('adults', 1, 2));
+  const [kids, setKids] = useState(() => count('kids', 0, 0));
+  const [pets, setPets] = useState(params.get('pets') === '1');
   const [requests, setRequests] = useState('');
   // Private until the booker says otherwise, matching the column default.
   const [isPrivate, setIsPrivate] = useState(true);
@@ -88,6 +105,7 @@ export default function BookPage() {
   const atCapacity = (conflicts?.totalAdults ?? 0) === capacityLimit;
 
   const errors = {
+    full_name: mustAnswer && !fullName.trim() ? 'Please enter your full name.' : null,
     phone:
       phoneError(contact.phone) ??
       (mustAnswer && !contact.phone.trim() ? 'Please enter a phone number we can reach you at.' : null),
@@ -122,6 +140,7 @@ export default function BookPage() {
           has_pets: pets,
           other_requests: requests.trim() || null,
           is_private: isPrivate,
+          full_name: fullName.trim() || null,
           phone: contact.phone.trim() || null,
           home_city: contact.home_city.trim() || null,
           home_state: contact.home_state.trim() || null,
@@ -310,7 +329,7 @@ export default function BookPage() {
             <legend className="px-1 text-sm font-bold text-charcoal">About you</legend>
             {onFile && !editingContact ? (
               <p className="text-sm text-muted">
-                Contact info on file for {user?.home_city}, {user?.home_state}.{' '}
+                Contact info on file for {user?.full_name} ({user?.home_city}, {user?.home_state}).{' '}
                 <button
                   type="button"
                   className="font-semibold text-forest-700 underline"
@@ -320,6 +339,19 @@ export default function BookPage() {
                 </button>
               </p>
             ) : (
+              <>
+              <Field label={`Full name${mustAnswer ? '' : ' (optional)'}`}>
+                <Input
+                  autoComplete="name"
+                  maxLength={100}
+                  value={fullName}
+                  onChange={(e) => setFullName(e.target.value)}
+                  placeholder="Jean Dugas"
+                />
+                {showErrors && errors.full_name && (
+                  <p className="mt-1 text-sm text-clay">{errors.full_name}</p>
+                )}
+              </Field>
               <ContactFields
                 values={contact}
                 onChange={setContact}
@@ -330,6 +362,7 @@ export default function BookPage() {
                     : { phone: phoneError(contact.phone) }
                 }
               />
+              </>
             )}
           </fieldset>
 
