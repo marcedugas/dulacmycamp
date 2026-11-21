@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
 anyhow = "1.0.104"
 # argon2id for the optional admin password login. Matches the hashing choice
 # in the sibling ShiftScheduler app so the two stay consistent.

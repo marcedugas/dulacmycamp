@@ -12,6 +12,7 @@ import MyBookings from './routes/MyBookings';
 import Profile from './routes/Profile';
 import Inbox from './routes/Inbox';
 import Login from './routes/Login';
+import Privacy from './routes/Privacy';
 import Checkout from './routes/Checkout';
 import Journal from './routes/Journal';
 import JournalNew from './routes/JournalNew';
@@ -48,6 +49,7 @@ export default function App() {
           <Route path="/calendar" element={<CalendarPage />} />
           <Route path="/forecast" element={<ForecastPage />} />
           <Route path="/login" element={<Login />} />
+          <Route path="/privacy" element={<Privacy />} />
           <Route
             path="/book"
             element={

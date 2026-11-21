@@ -3,6 +3,8 @@
 use crate::{
     ApiResult, AppError, Shared,
     auth::{AdminUser, AuthUser},
+    contact::ContactFields,
+    pii::Sealed,
 };
 use axum::{
     Json,
@@ -18,7 +20,13 @@ pub struct User {
     pub id: Uuid,
     pub email: String,
     pub full_name: Option<String>,
-    pub phone: Option<String>,
+    /// Encrypted at rest; decrypted only when this struct is serialised, which
+    /// only happens in the account's own responses and the admin ones.
+    pub phone: Option<Sealed>,
+    pub home_city: Option<String>,
+    pub home_state: Option<String>,
+    /// Encrypted at rest, like `phone`.
+    pub mailing_address: Option<Sealed>,
     pub relationship: Option<String>,
     pub boat_info: Option<String>,
     pub notes: Option<String>,
@@ -96,7 +104,8 @@ pub fn first_name(full_name: Option<&str>) -> String {
 /// `password_hash` is deliberately absent: only its presence is exposed, as
 /// `has_password`. The one place the hash itself is read is
 /// [`find_with_password`], which the password login calls and nothing else.
-pub const USER_COLUMNS: &str = "id, email, full_name, phone, relationship, boat_info, notes, \
+pub const USER_COLUMNS: &str = "id, email, full_name, phone, home_city, home_state, \
+                                mailing_address, relationship, boat_info, notes, \
                                 role, is_owner, blocked_at, avatar_url, \
                                 (password_hash IS NOT NULL) AS has_password, \
                                 last_login_at, created_at, updated_at";
@@ -221,7 +230,6 @@ pub async fn get_me(AuthUser(user): AuthUser) -> Json<User> {
 #[derive(Debug, Deserialize)]
 pub struct UpdateProfile {
     pub full_name: Option<String>,
-    pub phone: Option<String>,
     pub relationship: Option<String>,
     pub boat_info: Option<String>,
     pub notes: Option<String>,
@@ -241,18 +249,95 @@ pub async fn update_me(
         .ok_or_else(|| AppError::BadRequest("Full name is required.".into()))?;
 
     let updated = sqlx::query_as::<_, User>(&format!(
-        "UPDATE users SET full_name = $2, phone = $3, relationship = $4, boat_info = $5, notes = $6
+        "UPDATE users SET full_name = $2, relationship = $4, boat_info = $5, notes = $6
          WHERE id = $1 RETURNING {USER_COLUMNS}"
     ))
     .bind(user.id)
     .bind(full_name)
-    .bind(clean(body.phone))
+    .bind(None::<String>) // $3 unused: phone is saved via /users/me/contact
     .bind(clean(body.relationship))
     .bind(clean(body.boat_info))
     .bind(clean(body.notes))
     .fetch_one(&state.db)
     .await?;
 
+    Ok(Json(updated))
+}
+
+// No `Debug`: these are private contact details and must not reach a log.
+#[derive(Deserialize)]
+pub struct UpdateContact {
+    pub phone: Option<String>,
+    pub home_city: Option<String>,
+    pub home_state: Option<String>,
+    pub mailing_address: Option<String>,
+}
+
+/// `PUT /users/me/contact` — replaces the caller's contact info. Blank clears
+/// a field. Nothing is required here; the booking form is where guests are
+/// asked for it.
+pub async fn update_my_contact(
+    State(state): State<Shared>,
+    AuthUser(user): AuthUser,
+    Json(body): Json<UpdateContact>,
+) -> ApiResult<Json<User>> {
+    let c = ContactFields::parse(
+        &body.phone,
+        &body.home_city,
+        &body.home_state,
+        &body.mailing_address,
+    )?;
+    let updated = sqlx::query_as::<_, User>(&format!(
+        "UPDATE users SET phone = $2, home_city = $3, home_state = $4, mailing_address = $5
+         WHERE id = $1 RETURNING {USER_COLUMNS}"
+    ))
+    .bind(user.id)
+    .bind(c.sealed_phone().map_err(AppError::Internal)?)
+    .bind(&c.home_city)
+    .bind(&c.home_state)
+    .bind(c.sealed_address().map_err(AppError::Internal)?)
+    .fetch_one(&state.db)
+    .await?;
+    tracing::info!(user_id = %user.id, "contact info updated");
+    Ok(Json(updated))
+}
+
+/// Clears phone, address, city and state for one account.
+async fn clear_contact(db: &sqlx::PgPool, id: Uuid) -> Result<Option<User>, sqlx::Error> {
+    sqlx::query_as::<_, User>(&format!(
+        "UPDATE users SET phone = NULL, home_city = NULL, home_state = NULL,
+                          mailing_address = NULL
+         WHERE id = $1 RETURNING {USER_COLUMNS}"
+    ))
+    .bind(id)
+    .fetch_optional(db)
+    .await
+}
+
+/// `DELETE /users/me/contact` — the applicant deleting their own contact info.
+pub async fn clear_my_contact(
+    State(state): State<Shared>,
+    AuthUser(user): AuthUser,
+) -> ApiResult<Json<User>> {
+    let updated = clear_contact(&state.db, user.id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found.".into()))?;
+    tracing::info!(user_id = %user.id, "contact info deleted by owner of the account");
+    Ok(Json(updated))
+}
+
+/// `DELETE /users/{id}/contact` — an admin clearing someone's contact info on
+/// request. Account-level data only; stay-level answers stay on their booking
+/// and go when that booking is deleted.
+pub async fn clear_contact_admin(
+    State(state): State<Shared>,
+    AdminUser(admin): AdminUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<User>> {
+    let updated = clear_contact(&state.db, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found.".into()))?;
+    tracing::info!(user_id = %id, by = %admin.email, "contact info cleared by admin");
     Ok(Json(updated))
 }
 
@@ -289,7 +374,8 @@ pub async fn list_all(
     AdminUser(_): AdminUser,
 ) -> ApiResult<Json<Vec<UserWithStats>>> {
     let rows = sqlx::query_as::<_, UserWithStats>(&format!(
-        "SELECT u.id, u.email, u.full_name, u.phone, u.relationship, u.boat_info, u.notes,
+        "SELECT u.id, u.email, u.full_name, u.phone, u.home_city, u.home_state,
+                u.mailing_address, u.relationship, u.boat_info, u.notes,
                 u.role, u.is_owner, u.blocked_at, u.avatar_url,
                 (u.password_hash IS NOT NULL) AS has_password,
                 u.last_login_at, u.created_at, u.updated_at,
@@ -553,6 +639,9 @@ mod tests {
             email: "guest@example.com".into(),
             full_name: None,
             phone: None,
+            home_city: None,
+            home_state: None,
+            mailing_address: None,
             relationship: None,
             boat_info: None,
             notes: None,

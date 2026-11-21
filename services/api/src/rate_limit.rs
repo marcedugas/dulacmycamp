@@ -92,6 +92,12 @@ pub struct RateLimits {
     /// Password attempts per address, so one account cannot be ground down
     /// from a rotating pool of addresses.
     pub password_per_email: RateLimiter,
+    /// Booking requests submitted per account. Counts only requests that got
+    /// past validation, so fixing a form error does not burn the budget.
+    pub booking_per_user: RateLimiter,
+    /// Booking requests per client IP. Roomy, because a family shares one
+    /// network at the camp.
+    pub booking_per_ip: RateLimiter,
 }
 
 impl Default for RateLimits {
@@ -121,6 +127,11 @@ impl Default for RateLimits {
             // password budget costs that account holder nothing but the
             // password path, which OTP already backs up.
             password_per_email: RateLimiter::new(5, Duration::from_secs(900)),
+
+            // A real person asks for a stay or two. Three in ten minutes
+            // covers "oops, wrong dates" retries; a script gets nothing.
+            booking_per_user: RateLimiter::new(3, Duration::from_secs(600)),
+            booking_per_ip: RateLimiter::new(12, Duration::from_secs(600)),
         }
     }
 }

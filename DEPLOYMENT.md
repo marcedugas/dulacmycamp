@@ -107,6 +107,7 @@ Set on **dulacmycamp-api**:
 |---|---|
 | `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` |
 | `JWT_SECRET` | 32 random bytes, generated at setup |
+| `PII_ENCRYPTION_KEY` | **Marc sets this in Railway himself** — 64 hex chars (`openssl rand -hex 32`). See below |
 | `API_BASE_URL` | the API's own public URL |
 | `FRONTEND_URL` | the web service's public URL |
 | `LEGACY_FRONTEND_URL` | `https://dulacmycamp-web-production.up.railway.app` — keeps the pre-cutover origin working through CORS; unset it to retire that address |
@@ -122,6 +123,24 @@ changing it needs a **redeploy**, not a restart.
 `API_BASE_URL` is the one that fails silently: it builds the approve/deny links
 in the owner's email. Point it somewhere unreachable and the buttons in real
 emails are dead, with nothing failing anywhere else.
+
+### `PII_ENCRYPTION_KEY` — read before setting
+
+Guests' **phone number and mailing address** are encrypted in the database
+(AES-256-GCM) with this key. City/state and the referral answer are not.
+
+- **The API refuses to start in production without it.** Only a local run
+  (frontend on `localhost`, not on Railway) falls back to a public dev key, and
+  logs a warning when it does.
+- **Losing or changing the key makes every stored phone number and mailing
+  address unrecoverable** — they read as empty, sign-in is unaffected, and
+  guests simply have to enter them again. Keep a copy somewhere safe (password
+  manager), separate from the database and its backups.
+- Generate it yourself and paste it straight into the Railway variable. Never
+  put it in chat, a commit, or a screenshot. Rotating it is not supported in
+  this version (it would need a re-encrypt step).
+- A phone number saved before this existed is still plaintext until that user
+  next saves it; nothing is backfilled.
 
 ## Still to do before real guests use it
 

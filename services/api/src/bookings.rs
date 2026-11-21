@@ -8,12 +8,16 @@
 use crate::{
     ApiResult, AppError, Shared,
     auth::{AdminUser, AuthUser, MaybeUser},
+    contact::{self, ApplicantInput, ApplicantView},
     email, email_templates, notifications,
+    pii::Sealed,
+    rate_limit::client_ip,
     users::{self, User},
 };
 use axum::{
     Form, Json,
-    extract::{Path, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
+    http::HeaderMap,
     response::Html,
 };
 use chrono::{DateTime, Duration, NaiveDate, Utc};
@@ -67,6 +71,16 @@ struct BookingRow {
     /// the id, and who the author chose to show it to.
     journal_id: Option<Uuid>,
     journal_visibility: Option<String>,
+    // Applicant details. Loaded into every row but only ever turned into
+    // output by `to_view`, behind the `full` gate. Phone and address are still
+    // ciphertext here ([`Sealed`] decrypts only when serialised/opened).
+    referral: Option<String>,
+    watercraft: Option<String>,
+    watercraft_details: Option<String>,
+    applicant_phone: Option<Sealed>,
+    applicant_city: Option<String>,
+    applicant_state: Option<String>,
+    applicant_address: Option<Sealed>,
 }
 
 /// What a given caller is allowed to see about a booking.
@@ -152,6 +166,12 @@ pub struct BookingView {
     /// this field existed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub guest_first_name: Option<String>,
+    /// Phone, location, referral and watercraft. Present only when `full` —
+    /// the applicant themselves, admins and the camp owner — and built as its
+    /// own allow-listed struct, never by serialising user/booking rows. Absent
+    /// from the public calendar, other guests and family accounts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applicant: Option<ApplicantView>,
 }
 
 /// Whether the calendar may name the person on this stay.
@@ -191,6 +211,21 @@ fn shows_booker(signed_in: bool, sees_guest_details: bool, is_private: bool, sta
 }
 
 impl BookingRow {
+    /// The applicant block, decrypting phone and address. Callers must have
+    /// already established the viewer may see it.
+    fn applicant_view(&self) -> ApplicantView {
+        ApplicantView {
+            phone: self.applicant_phone.as_ref().and_then(Sealed::open),
+            home_city: self.applicant_city.clone(),
+            home_state: self.applicant_state.clone(),
+            mailing_address: self.applicant_address.as_ref().and_then(Sealed::open),
+            referral: self.referral.clone(),
+            no_referral: contact::no_referral(self.referral.as_deref()),
+            watercraft: self.watercraft.clone(),
+            watercraft_details: self.watercraft_details.clone(),
+        }
+    }
+
     /// Projects the row down to what `viewer` may see.
     fn to_view(&self, viewer: Option<&User>) -> BookingView {
         let b = &self.booking;
@@ -235,6 +270,7 @@ impl BookingRow {
             // their story. It also never falls back to the email the way the
             // admin-facing `guest_name` above does.
             guest_first_name: named.then(|| users::first_name(self.guest_name.as_deref())),
+            applicant: full.then(|| self.applicant_view()),
         }
     }
 }
@@ -243,7 +279,10 @@ fn select_rows() -> String {
     format!(
         "SELECT {}, u.full_name AS guest_name, u.email AS guest_email, \
                 (bc.id IS NOT NULL) AS checked_out, bc.notes AS checkout_notes, \
-                je.id AS journal_id, je.visibility AS journal_visibility
+                je.id AS journal_id, je.visibility AS journal_visibility,
+                b.referral, b.watercraft, b.watercraft_details,
+                u.phone AS applicant_phone, u.home_city AS applicant_city,
+                u.home_state AS applicant_state, u.mailing_address AS applicant_address
          FROM bookings b
          JOIN users u ON u.id = b.user_id
          LEFT JOIN booking_checkouts bc ON bc.booking_id = b.id
@@ -534,7 +573,23 @@ pub struct CreateBooking {
     /// Absent means private — see [`private_by_default`].
     #[serde(default = "private_by_default")]
     pub is_private: bool,
+    /// Phone, location, referral, watercraft (+ the honeypot). See
+    /// [`contact::prepare`] for who must supply what.
+    #[serde(flatten)]
+    pub applicant: ApplicantInput,
 }
+
+/// How a booking is being submitted, which decides which rules apply.
+pub struct SubmitCtx {
+    /// A person submitting through the public form (as opposed to an admin
+    /// entering a booking on someone's behalf). Only these are rate-limited,
+    /// and only a `guest` among them must supply applicant details.
+    pub self_service: bool,
+    pub ip: Option<String>,
+}
+
+/// Most requests one account may have waiting at once.
+const MAX_PENDING_PER_USER: i64 = 5;
 
 /// What every write that lands a booking returns — a guest's own request, an
 /// admin entering one, and an admin editing one. The same shape on purpose:
@@ -552,10 +607,25 @@ pub struct BookingWriteResponse {
 
 pub async fn create(
     State(state): State<Shared>,
+    headers: HeaderMap,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     AuthUser(user): AuthUser,
     Json(body): Json<CreateBooking>,
 ) -> ApiResult<Json<BookingWriteResponse>> {
-    Ok(Json(create_booking_for(&state, &user, body).await?))
+    // Honeypot: a hidden field no person can see or fill. A generic error,
+    // and no booking, no email, nothing stored — and no hint to a bot which
+    // field gave it away.
+    if body.applicant.honeypot_tripped() {
+        tracing::info!(user_id = %user.id, "booking request rejected by honeypot");
+        return Err(AppError::BadRequest(
+            "We couldn't submit that request. Please try again.".into(),
+        ));
+    }
+    let ctx = SubmitCtx {
+        self_service: true,
+        ip: Some(client_ip(&headers, Some(peer))),
+    };
+    Ok(Json(create_booking_for(&state, &user, body, ctx).await?))
 }
 
 /// The actual booking-creation logic: validation, blackout check,
@@ -572,6 +642,7 @@ pub async fn create_booking_for(
     state: &Shared,
     user: &User,
     body: CreateBooking,
+    ctx: SubmitCtx,
 ) -> ApiResult<BookingWriteResponse> {
     // Defence in depth, and the one check that isn't redundant on both paths.
     // A blocked guest submitting their own request never gets this far — the
@@ -605,6 +676,13 @@ pub async fn create_booking_for(
     if body.guest_count_kids < 0 {
         return Err(AppError::BadRequest("Kid count can't be negative.".into()));
     }
+
+    // Applicant details: validated whenever supplied, and *required* only of a
+    // guest submitting their own request. Family ('user'), admin/owner
+    // accounts and an admin entering a booking for someone are never blocked
+    // by them.
+    let enforce = ctx.self_service && user.role == "guest";
+    let applicant = contact::prepare(user, &body.applicant, enforce)?;
 
     // Blackouts are inclusive on both ends and are a hard stop.
     let blackout: Option<(NaiveDate, NaiveDate, Option<String>)> = sqlx::query_as(
@@ -640,12 +718,75 @@ pub async fn create_booking_for(
     )
     .await?;
 
+    // Abuse guards for the public form only — after validation, so fixing a
+    // form error never costs budget. In-process, no new service; see
+    // `rate_limit`.
+    if ctx.self_service {
+        let (pending,): (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM bookings WHERE user_id = $1 AND status = 'pending'",
+        )
+        .bind(user.id)
+        .fetch_one(&state.db)
+        .await?;
+        if pending >= MAX_PENDING_PER_USER {
+            return Err(AppError::TooManyRequests(format!(
+                "You already have {pending} requests waiting for the owner. \
+                 Please wait for a reply before sending more."
+            )));
+        }
+        if let Err(retry) = state.limits.booking_per_user.check(&user.id.to_string()) {
+            return Err(AppError::TooManyRequests(format!(
+                "You're sending requests quickly. Try again in {} minute{}.",
+                retry.div_ceil(60),
+                if retry.div_ceil(60) == 1 { "" } else { "s" },
+            )));
+        }
+        if let Some(ip) = ctx.ip.as_deref()
+            && let Err(retry) = state.limits.booking_per_ip.check(ip)
+        {
+            tracing::warn!(%retry, "booking request rate limited by ip");
+            return Err(AppError::TooManyRequests(
+                "Too many requests from this network. Please try again in a few minutes.".into(),
+            ));
+        }
+    }
+
     let token = new_token();
+    let mut tx = state.db.begin().await?;
+
+    // Person-level answers land on the profile, so a returning guest is not
+    // asked again. Only what was actually supplied is written.
+    let sealed_phone = applicant
+        .contact
+        .sealed_phone()
+        .map_err(AppError::Internal)?;
+    let sealed_address = applicant
+        .contact
+        .sealed_address()
+        .map_err(AppError::Internal)?;
+    if !applicant.contact.is_empty() {
+        sqlx::query(
+            "UPDATE users SET phone = COALESCE($2, phone), home_city = COALESCE($3, home_city),
+                              home_state = COALESCE($4, home_state),
+                              mailing_address = COALESCE($5, mailing_address)
+             WHERE id = $1",
+        )
+        .bind(user.id)
+        .bind(&sealed_phone)
+        .bind(&applicant.contact.home_city)
+        .bind(&applicant.contact.home_state)
+        .bind(&sealed_address)
+        .execute(&mut *tx)
+        .await?;
+    }
+
     let booking = sqlx::query_as::<_, Booking>(&format!(
         "INSERT INTO bookings
            (user_id, check_in, check_out, guest_count_adults, guest_count_kids,
-            has_pets, other_requests, is_private, approve_token, approve_token_expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now() + ($10 || ' hours')::interval)
+            has_pets, other_requests, is_private, approve_token, approve_token_expires_at,
+            referral, watercraft, watercraft_details)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now() + ($10 || ' hours')::interval,
+                 $11, $12, $13)
          RETURNING {BOOKING_COLUMNS}"
     ))
     .bind(user.id)
@@ -663,8 +804,12 @@ pub async fn create_booking_for(
     .bind(body.is_private)
     .bind(&token)
     .bind(APPROVE_TOKEN_TTL_HOURS.to_string())
-    .fetch_one(&state.db)
+    .bind(&applicant.referral)
+    .bind(&applicant.watercraft)
+    .bind(&applicant.watercraft_details)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     // ── notifications ──
     let guest_name = user.display_name();
@@ -674,12 +819,23 @@ pub async fn create_booking_for(
     email::spawn_all(
         state.clone(),
         email::owner_recipients(state).await,
-        email_templates::booking_request_to_owner(&booking, &guest_name, &approve_url, &deny_url),
+        email_templates::booking_request_to_owner(
+            &booking,
+            &guest_name,
+            &approve_url,
+            &deny_url,
+            applicant.watercraft.as_deref(),
+        ),
     );
     email::spawn_opt(
         state.clone(),
         state.cfg.admin_email.clone(),
-        email_templates::booking_request_to_admin(&booking, &guest_name, app_url(state)),
+        email_templates::booking_request_to_admin(
+            &booking,
+            &guest_name,
+            app_url(state),
+            applicant.watercraft.as_deref(),
+        ),
     );
     email::spawn(
         state.clone(),
@@ -711,6 +867,21 @@ pub async fn create_booking_for(
         checkout_notes: None,
         journal_id: None,
         journal_visibility: None,
+        referral: applicant.referral.clone(),
+        watercraft: applicant.watercraft.clone(),
+        watercraft_details: applicant.watercraft_details.clone(),
+        applicant_phone: sealed_phone.or_else(|| user.phone.clone()),
+        applicant_city: applicant
+            .contact
+            .home_city
+            .clone()
+            .or_else(|| user.home_city.clone()),
+        applicant_state: applicant
+            .contact
+            .home_state
+            .clone()
+            .or_else(|| user.home_state.clone()),
+        applicant_address: sealed_address.or_else(|| user.mailing_address.clone()),
     };
 
     Ok(BookingWriteResponse {
@@ -754,6 +925,9 @@ impl From<AdminCreateBooking> for CreateBooking {
             has_pets: admin.has_pets,
             other_requests: admin.other_requests,
             is_private: admin.is_private,
+            // An admin entering a booking for someone is never blocked by,
+            // and does not invent, the applicant's own answers.
+            applicant: ApplicantInput::default(),
         }
     }
 }
@@ -780,7 +954,13 @@ pub async fn admin_create(
 
     let guest = users::find_or_create_guest(&state.db, email, body.full_name.as_deref()).await?;
 
-    Ok(Json(create_booking_for(&state, &guest, body.into()).await?))
+    let ctx = SubmitCtx {
+        self_service: false,
+        ip: None,
+    };
+    Ok(Json(
+        create_booking_for(&state, &guest, body.into(), ctx).await?,
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -789,6 +969,15 @@ pub struct UpdateBooking {
     pub check_out: NaiveDate,
     pub guest_count_adults: i32,
     pub guest_count_kids: i32,
+    /// Stay-level answers an owner may correct (a typo). Omitted = leave
+    /// as is; present-but-blank clears. Phone and address are deliberately
+    /// not editable here.
+    #[serde(default)]
+    pub referral: Option<String>,
+    #[serde(default)]
+    pub watercraft: Option<String>,
+    #[serde(default)]
+    pub watercraft_details: Option<String>,
 }
 
 /// Whether a proposed guest count is one the `bookings` CHECK constraints
@@ -930,9 +1119,26 @@ pub async fn admin_update_booking(
         ),
     );
 
+    // Validate the stay-level answers through the same rules as the form.
+    let fixes = contact::prepare(
+        &admin,
+        &ApplicantInput {
+            referral: body.referral.clone(),
+            watercraft: body.watercraft.clone(),
+            watercraft_details: body.watercraft_details.clone(),
+            ..Default::default()
+        },
+        false,
+    )?;
+    let set_referral = body.referral.is_some();
+    let set_watercraft = body.watercraft.is_some();
+
     let booking = sqlx::query_as::<_, Booking>(&format!(
         "UPDATE bookings
          SET check_in = $2, check_out = $3, guest_count_adults = $4, guest_count_kids = $5,
+             referral = CASE WHEN $6 THEN $7 ELSE referral END,
+             watercraft = CASE WHEN $8 THEN $9 ELSE watercraft END,
+             watercraft_details = CASE WHEN $8 THEN $10 ELSE watercraft_details END,
              updated_at = now()
          WHERE id = $1 RETURNING {BOOKING_COLUMNS}"
     ))
@@ -941,6 +1147,11 @@ pub async fn admin_update_booking(
     .bind(body.check_out)
     .bind(body.guest_count_adults)
     .bind(body.guest_count_kids)
+    .bind(set_referral)
+    .bind(&fixes.referral)
+    .bind(set_watercraft)
+    .bind(&fixes.watercraft)
+    .bind(&fixes.watercraft_details)
     .fetch_one(&state.db)
     .await?;
 
@@ -1834,6 +2045,7 @@ mod tests {
             has_pets: true,
             other_requests: Some("Bringing a boat trailer".into()),
             is_private: false,
+            applicant: ApplicantInput::default(),
         };
         assert_eq!(CreateBooking::from(admin_input), expected);
     }

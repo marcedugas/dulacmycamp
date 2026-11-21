@@ -1,9 +1,12 @@
 import { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
 import { KeyRound } from 'lucide-react';
 import { Button, Card, Field, Input, PageHeader, Textarea } from '../components/ui';
+import { ContactFields, contactFromUser, type ContactValues } from '../components/ContactFields';
 import { api, ApiError } from '../lib/api';
 import { useAuth } from '../lib/auth';
+import { phoneError } from '../lib/contact';
 import type { MessageResponse, User } from '../lib/types';
 
 /** Mirrors `password::MIN_PASSWORD_LEN`; the server is still the authority. */
@@ -90,11 +93,83 @@ function PasswordSection({ hasPassword, onSaved }: { hasPassword: boolean; onSav
   );
 }
 
+/**
+ * Phone, city/state and mailing address. Saved and deleted on their own, so
+ * "delete my contact info" never touches the rest of the profile.
+ */
+function ContactSection() {
+  const { user, refresh } = useAuth();
+  const [values, setValues] = useState<ContactValues>(() => contactFromUser(user));
+  const [busy, setBusy] = useState(false);
+  const hasAny = Boolean(user?.phone || user?.home_city || user?.home_state || user?.mailing_address);
+  const bad = phoneError(values.phone);
+
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (bad) return;
+    setBusy(true);
+    try {
+      await api<User>('/users/me/contact', {
+        method: 'PUT',
+        body: {
+          phone: values.phone.trim() || null,
+          home_city: values.home_city.trim() || null,
+          home_state: values.home_state.trim() || null,
+          mailing_address: values.mailing_address.trim() || null,
+        },
+      });
+      await refresh();
+      toast.success('Contact info saved.');
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'Could not save your contact info.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    if (!window.confirm('Delete your phone, address, city and state from your account?')) return;
+    setBusy(true);
+    try {
+      await api<User>('/users/me/contact', { method: 'DELETE' });
+      setValues({ phone: '', home_city: '', home_state: '', mailing_address: '' });
+      await refresh();
+      toast.success('Your contact info was deleted.');
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'Could not delete your contact info.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card className="mt-6">
+      <h2 className="font-display text-lg font-bold text-charcoal">Contact info</h2>
+      <p className="mb-4 text-sm text-muted">
+        Only the camp owners can see this. We never sell it or share it with anyone else.{' '}
+        <Link to="/privacy" className="font-semibold text-forest-700 underline">
+          Privacy
+        </Link>
+      </p>
+      <form onSubmit={save} className="space-y-4">
+        <ContactFields values={values} onChange={setValues} errors={{ phone: bad }} />
+        <div className="flex flex-wrap gap-2">
+          <Button type="submit" disabled={busy || Boolean(bad)}>
+            {busy ? 'Saving…' : 'Save contact info'}
+          </Button>
+          <Button type="button" variant="ghost" disabled={busy || !hasAny} onClick={remove}>
+            Delete my contact info
+          </Button>
+        </div>
+      </form>
+    </Card>
+  );
+}
+
 export default function Profile() {
   const { user, refresh } = useAuth();
   const [form, setForm] = useState({
     full_name: user?.full_name ?? '',
-    phone: user?.phone ?? '',
     relationship: user?.relationship ?? '',
     boat_info: user?.boat_info ?? '',
     notes: user?.notes ?? '',
@@ -132,9 +207,6 @@ export default function Profile() {
           </Field>
 
           <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="Phone">
-              <Input type="tel" value={form.phone} onChange={set('phone')} placeholder="(985) 555-0134" />
-            </Field>
             <Field label="Relationship to the owners" hint="Cousin, friend of Marc, etc.">
               <Input value={form.relationship} onChange={set('relationship')} />
             </Field>
@@ -153,6 +225,8 @@ export default function Profile() {
           </Button>
         </form>
       </Card>
+
+      {user && <ContactSection />}
 
       {user && <PasswordSection hasPassword={user.has_password} onSaved={refresh} />}
     </div>

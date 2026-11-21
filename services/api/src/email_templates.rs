@@ -157,11 +157,13 @@ pub fn booking_request_to_owner(
     guest: &str,
     approve_url: &str,
     deny_url: &str,
+    watercraft: Option<&str>,
 ) -> Email {
     let subject = format!("{guest} requested dates at the camp");
     let body = format!(
-        r#"<p style="margin:0 0 14px;">A new request came in for the camp.</p>{}"#,
-        booking_rows(b, guest)
+        r#"<p style="margin:0 0 14px;">A new request came in for the camp.</p>{}{}"#,
+        booking_rows(b, guest),
+        applicant_note_html(watercraft)
     );
     let actions = format!(
         r#"<table role="presentation" cellpadding="0" cellspacing="0" style="margin:24px 0 10px;"><tr>{}{}</tr></table>
@@ -170,8 +172,9 @@ pub fn booking_request_to_owner(
         button("Deny", deny_url, RED),
     );
     let text = format!(
-        "{guest} requested dates at the camp\n\n{}\nApprove: {approve_url}\nDeny: {deny_url}\n\nButtons are valid for 48 hours.\n",
-        booking_text(b, guest)
+        "{guest} requested dates at the camp\n\n{}{}\nApprove: {approve_url}\nDeny: {deny_url}\n\nButtons are valid for 48 hours.\n",
+        booking_text(b, guest),
+        applicant_note_text(watercraft)
     );
     (
         subject,
@@ -180,20 +183,52 @@ pub fn booking_request_to_owner(
     )
 }
 
+/// Email is the weakest place for personal details — it passes through the
+/// mail provider and then sits unencrypted in inboxes. So the request emails
+/// carry no phone, address, city or referral; only the (non-sensitive)
+/// watercraft kind and a pointer to the admin Bookings tab.
+fn applicant_note_html(watercraft: Option<&str>) -> String {
+    let craft = watercraft
+        .map(|w| {
+            format!(
+                "Watercraft: {}<br>",
+                esc(crate::contact::watercraft_label(w))
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        r#"<p style="margin:10px 0 0;font-size:13px;color:#6b6255;">{craft}Applicant details are in the admin Bookings tab.</p>"#
+    )
+}
+
+fn applicant_note_text(watercraft: Option<&str>) -> String {
+    let craft = watercraft
+        .map(|w| format!("Watercraft: {}\n", crate::contact::watercraft_label(w)))
+        .unwrap_or_default();
+    format!("{craft}Applicant details are in the admin Bookings tab.\n")
+}
+
 /// Informational copy for the admin — no action buttons, admin uses the app.
-pub fn booking_request_to_admin(b: &Booking, guest: &str, app_url: &str) -> Email {
+pub fn booking_request_to_admin(
+    b: &Booking,
+    guest: &str,
+    app_url: &str,
+    watercraft: Option<&str>,
+) -> Email {
     let subject = format!("New booking request from {guest}");
     let body = format!(
-        r#"<p style="margin:0 0 14px;">The owner has been emailed for approval. This copy is for your records.</p>{}"#,
-        booking_rows(b, guest)
+        r#"<p style="margin:0 0 14px;">The owner has been emailed for approval. This copy is for your records.</p>{}{}"#,
+        booking_rows(b, guest),
+        applicant_note_html(watercraft)
     );
     let actions = format!(
         r#"<table role="presentation" cellpadding="0" cellspacing="0" style="margin:22px 0 4px;"><tr>{}</tr></table>"#,
         button("Open admin panel", &format!("{app_url}/admin"), BROWN)
     );
     let text = format!(
-        "New booking request from {guest}\n\n{}\nAdmin panel: {app_url}/admin\n",
-        booking_text(b, guest)
+        "New booking request from {guest}\n\n{}{}\nAdmin panel: {app_url}/admin\n",
+        booking_text(b, guest),
+        applicant_note_text(watercraft)
     );
     (
         subject,
