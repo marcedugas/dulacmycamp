@@ -19,11 +19,14 @@ export function ContactFields({
   onChange,
   errors = {},
   required = false,
+  stayHint = false,
 }: {
   values: ContactValues;
   onChange: (next: ContactValues) => void;
   errors?: ContactErrors;
   required?: boolean;
+  /** Profile page: explain why city/state exist though optional here. */
+  stayHint?: boolean;
 }) {
   const set = (key: keyof ContactValues) => (e: { target: { value: string } }) =>
     onChange({ ...values, [key]: e.target.value });
@@ -44,7 +47,7 @@ export function ContactFields({
         {err(errors.phone)}
       </Field>
       <div className="grid gap-4 sm:grid-cols-2">
-        <Field label={`City${star}`}>
+        <Field label={`City${star}`} hint={stayHint ? 'Needed when you request a stay.' : undefined}>
           <Input
             autoComplete="address-level2"
             maxLength={80}
@@ -53,7 +56,7 @@ export function ContactFields({
           />
           {err(errors.home_city)}
         </Field>
-        <Field label={`State${star}`}>
+        <Field label={`State${star}`} hint={stayHint ? 'Needed when you request a stay.' : undefined}>
           <Input
             autoComplete="address-level1"
             maxLength={40}

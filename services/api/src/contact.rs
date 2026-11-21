@@ -12,6 +12,7 @@ use crate::{AppError, pii::Sealed, users::User};
 use serde::{Deserialize, Serialize};
 
 pub const WATERCRAFT_KINDS: [&str; 4] = ["none", "boat", "kayak_canoe", "other"];
+pub const MAX_NAME: usize = 100;
 pub const MAX_CITY: usize = 80;
 pub const MAX_STATE: usize = 40;
 pub const MAX_ADDRESS: usize = 300;
@@ -22,6 +23,7 @@ pub const MAX_WATERCRAFT_DETAILS: usize = 300;
 /// rules below decide what a given caller must supply.
 #[derive(Default, PartialEq, Deserialize)]
 pub struct ApplicantInput {
+    pub full_name: Option<String>,
     pub phone: Option<String>,
     pub home_city: Option<String>,
     pub home_state: Option<String>,
@@ -135,6 +137,8 @@ impl ContactFields {
 
 /// A validated booking-request submission.
 pub struct Applicant {
+    /// Saved onto the profile when supplied.
+    pub full_name: Option<String>,
     pub contact: ContactFields,
     pub referral: Option<String>,
     pub watercraft: Option<String>,
@@ -156,6 +160,7 @@ pub fn prepare(user: &User, input: &ApplicantInput, enforce: bool) -> Result<App
         &input.mailing_address,
     )?;
     let referral = bounded(&input.referral, MAX_REFERRAL, "Referral")?;
+    let full_name = bounded(&input.full_name, MAX_NAME, "Name")?;
 
     let watercraft = match blank(&input.watercraft) {
         None => None,
@@ -183,6 +188,16 @@ pub fn prepare(user: &User, input: &ApplicantInput, enforce: bool) -> Result<App
             new.is_some() || old.as_deref().is_some_and(|s| !s.trim().is_empty())
         };
         let mut missing = Vec::new();
+        // The profile page is no longer a forced stop, so the booking form is
+        // where a new guest's name is collected.
+        if full_name.is_none()
+            && user
+                .full_name
+                .as_deref()
+                .is_none_or(|n| n.trim().is_empty())
+        {
+            missing.push("your full name");
+        }
         if contact.phone.is_none() && !on_file_phone {
             missing.push("a phone number");
         }
@@ -207,6 +222,7 @@ pub fn prepare(user: &User, input: &ApplicantInput, enforce: bool) -> Result<App
     }
 
     Ok(Applicant {
+        full_name,
         contact,
         referral,
         watercraft,
