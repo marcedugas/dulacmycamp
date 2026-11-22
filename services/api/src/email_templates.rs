@@ -151,6 +151,50 @@ pub fn password_changed(app_url: &str) -> Email {
     (subject, layout("Password changed", &body, ""), text)
 }
 
+/// The emailed code for resetting a forgotten password. Worded so it cannot be
+/// mistaken for a sign-in code: it says what it is for and what to do if the
+/// person never asked.
+pub fn password_reset_code(code: &str, ttl_minutes: i64) -> Email {
+    let subject = "Reset your Dulac My Camp password".to_string();
+    let body = format!(
+        r#"<p style="margin:0 0 18px;">Someone asked to reset the password on your Dulac My Camp account. Your password reset code is:</p>
+<p style="margin:0 0 18px;font-family:{FONT};font-size:38px;letter-spacing:9px;font-weight:700;color:{GREEN};">{code}</p>
+<p style="margin:0;color:#6b6255;font-size:14px;">This code expires in {ttl_minutes} minutes. If you didn't ask to reset your password, you can ignore this email — your password has not been changed.</p>"#
+    );
+    let text = format!(
+        "Reset your Dulac My Camp password\n\nSomeone asked to reset the password on your account. Your password reset code is: {code}\n\nThis code expires in {ttl_minutes} minutes. If you didn't ask for this, ignore this email - your password has not been changed.\n\n(c) 2026 Dulac My Camp\n"
+    );
+    (subject, layout("Reset your password", &body, ""), text)
+}
+
+/// Sent when an administrator sets a temporary password on someone's account.
+/// The password itself is never in the email — it is handed over by phone or
+/// in person.
+pub fn admin_temp_password_notice(app_url: &str) -> Email {
+    let subject = "An administrator set a temporary password on your account".to_string();
+    let body = format!(
+        r#"<p style="margin:0 0 18px;">An administrator set a temporary password on your Dulac My Camp account. You will be asked to choose a new one when you sign in.</p>
+<p style="margin:0;color:#6b6255;font-size:14px;">If you did not expect this, contact the camp. You can also sign in with an emailed code at <a href="{app_url}/login" style="color:{GREEN};">{app_url}/login</a>.</p>"#
+    );
+    let text = format!(
+        "An administrator set a temporary password on your Dulac My Camp account. You will be asked to choose a new one when you sign in.\n\nIf you did not expect this, contact the camp. You can also sign in with an emailed code at {app_url}/login.\n\n(c) 2026 Dulac My Camp\n"
+    );
+    (subject, layout("Temporary password set", &body, ""), text)
+}
+
+/// Sent when an administrator removes the password from someone's account.
+pub fn admin_password_removed_notice(app_url: &str) -> Email {
+    let subject = "An administrator removed the password on your account".to_string();
+    let body = format!(
+        r#"<p style="margin:0 0 18px;">An administrator removed the password from your Dulac My Camp account. You can still sign in with an emailed code, and set a new password afterwards if you like.</p>
+<p style="margin:0;color:#6b6255;font-size:14px;">If you did not expect this, contact the camp. Sign in at <a href="{app_url}/login" style="color:{GREEN};">{app_url}/login</a>.</p>"#
+    );
+    let text = format!(
+        "An administrator removed the password from your Dulac My Camp account. You can still sign in with an emailed code, and set a new password afterwards if you like.\n\nIf you did not expect this, contact the camp. Sign in at {app_url}/login.\n\n(c) 2026 Dulac My Camp\n"
+    );
+    (subject, layout("Password removed", &body, ""), text)
+}
+
 /// Sent to the camp owner. This is the only email with action buttons.
 pub fn booking_request_to_owner(
     b: &Booking,

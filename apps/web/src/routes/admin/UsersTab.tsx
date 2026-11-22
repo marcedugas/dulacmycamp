@@ -2,18 +2,33 @@ import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { format } from 'date-fns';
 import { toast } from 'sonner';
-import { Ban, Crown, RotateCcw, Trash2 } from 'lucide-react';
+import { Ban, Copy, Crown, KeyRound, RotateCcw, Trash2 } from 'lucide-react';
 import { Button, EmptyState, Modal, Spinner, cx } from '../../components/ui';
 import { api, ApiError } from '../../lib/api';
 import { useUsers } from '../../lib/queries';
 import { useAuth } from '../../lib/auth';
-import type { Role, UserWithStats } from '../../lib/types';
+import type { Role, TempPassword, UserWithStats } from '../../lib/types';
 import { ROLE_LABELS, ROLES } from '../../lib/types';
 
 /** Everything a hard delete would destroy. The API refuses the delete unless
  *  this is zero, so it is also what decides whether the button is offered. */
 function historyCount(u: UserWithStats): number {
   return u.booking_count + u.journal_count + u.message_count;
+}
+
+/** "No password", "Password set", or when it is an admin-issued temporary one,
+ *  when it stops working — the thing an admin needs to know before helping
+ *  someone over the phone. */
+function passwordStatus(u: UserWithStats): { label: string; tone: 'none' | 'set' | 'temp' } {
+  if (!u.has_password) return { label: 'No password', tone: 'none' };
+  if (u.must_change_password) {
+    const until = u.temp_password_expires_at
+      ? format(new Date(u.temp_password_expires_at), 'MMM d, yyyy')
+      : 'unknown';
+    const expired = u.temp_password_expires_at && new Date(u.temp_password_expires_at) <= new Date();
+    return { label: `Temporary — ${expired ? 'expired' : 'expires'} ${until}`, tone: 'temp' };
+  }
+  return { label: 'Password set', tone: 'set' };
 }
 
 export default function UsersTab() {
@@ -24,6 +39,12 @@ export default function UsersTab() {
   // Blocking is reversible and gets a single click, like the role toggles.
   // Deleting is not, so it goes through this confirmation first.
   const [confirmDelete, setConfirmDelete] = useState<UserWithStats | null>(null);
+  // Password tools: which account a confirmation is open for, and the one
+  // temporary password currently on screen. The latter lives only in this
+  // state — closing the dialog drops it, and nothing else ever holds it.
+  const [confirmTemp, setConfirmTemp] = useState<UserWithStats | null>(null);
+  const [confirmRemovePw, setConfirmRemovePw] = useState<UserWithStats | null>(null);
+  const [shownTemp, setShownTemp] = useState<{ who: string; temp: TempPassword } | null>(null);
 
   const setRole = useMutation({
     mutationFn: ({ id, role }: { id: string; role: Role }) =>
@@ -77,6 +98,38 @@ export default function UsersTab() {
       toast.error(err instanceof ApiError ? err.message : 'Could not change that account.'),
   });
 
+  const setTempPassword = useMutation({
+    mutationFn: (u: UserWithStats) => api<TempPassword>(`/users/${u.id}/temp-password`, { method: 'POST' }),
+    onSuccess: (temp, u) => {
+      setConfirmTemp(null);
+      setShownTemp({ who: u.full_name ?? u.email, temp });
+      void queryClient.invalidateQueries({ queryKey: ['users'] });
+    },
+    onError: (err) =>
+      toast.error(err instanceof ApiError ? err.message : 'Could not set a temporary password.'),
+  });
+
+  const removePassword = useMutation({
+    mutationFn: (u: UserWithStats) => api(`/users/${u.id}/remove-password`, { method: 'POST' }),
+    onSuccess: () => {
+      toast.success('Password removed. They can sign in with an emailed code.');
+      setConfirmRemovePw(null);
+      void queryClient.invalidateQueries({ queryKey: ['users'] });
+    },
+    onError: (err) =>
+      toast.error(err instanceof ApiError ? err.message : 'Could not remove that password.'),
+  });
+
+  const copyTemp = async () => {
+    if (!shownTemp) return;
+    try {
+      await navigator.clipboard.writeText(shownTemp.temp.password);
+      toast.success('Copied.');
+    } catch {
+      toast.error('Could not copy. Select the password and copy it by hand.');
+    }
+  };
+
   const remove = useMutation({
     mutationFn: (id: string) => api(`/users/${id}`, { method: 'DELETE' }),
     onSuccess: () => {
@@ -113,12 +166,13 @@ export default function UsersTab() {
       )}
 
       <div className="overflow-x-auto rounded-xl border border-sand bg-white">
-        <table className="w-full min-w-[980px] text-sm">
+        <table className="w-full min-w-[1100px] text-sm">
           <thead className="border-b border-sand bg-cream-dark/60 text-left text-xs uppercase tracking-wide text-muted">
             <tr>
               <th className="px-3 py-2.5 font-bold">Name</th>
               <th className="px-3 py-2.5 font-bold">Email</th>
               <th className="px-3 py-2.5 font-bold">Role</th>
+              <th className="px-3 py-2.5 font-bold">Password</th>
               <th className="px-3 py-2.5 font-bold">Last login</th>
               <th className="px-3 py-2.5 font-bold">Bookings</th>
               <th className="px-3 py-2.5 text-right font-bold">Actions</th>
@@ -130,6 +184,7 @@ export default function UsersTab() {
               const admin = u.role === 'admin';
               const blocked = u.blocked_at !== null;
               const history = historyCount(u);
+              const pw = passwordStatus(u);
               // Both server-side rules, mirrored here so the button explains
               // itself instead of only failing when pressed.
               const blockable = !admin && !isMe;
@@ -212,6 +267,16 @@ export default function UsersTab() {
                       )}
                     </div>
                   </td>
+                  <td className="px-3 py-2.5 text-xs">
+                    <span
+                      className={cx(
+                        'font-semibold',
+                        pw.tone === 'temp' ? 'text-clay' : pw.tone === 'set' ? 'text-charcoal' : 'text-muted',
+                      )}
+                    >
+                      {pw.label}
+                    </span>
+                  </td>
                   <td className="px-3 py-2.5 text-xs text-muted">
                     {u.last_login_at ? format(new Date(u.last_login_at), 'MMM d, yyyy') : 'Never'}
                   </td>
@@ -282,6 +347,34 @@ export default function UsersTab() {
                           </>
                         )}
                       </Button>
+                      {/* Not offered on your own row — the server refuses it
+                          too; you change your own password on your profile. */}
+                      {!isMe && (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={setTempPassword.isPending}
+                            title="Generate a one-time password to give them by phone"
+                            onClick={() => setConfirmTemp(u)}
+                          >
+                            <KeyRound size={14} /> Set temporary password
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={!u.has_password || removePassword.isPending}
+                            title={
+                              u.has_password
+                                ? 'Clear their password so they can only use emailed codes'
+                                : 'They have no password to remove'
+                            }
+                            onClick={() => setConfirmRemovePw(u)}
+                          >
+                            Remove password
+                          </Button>
+                        </>
+                      )}
                       <Button
                         size="sm"
                         variant="ghost"
@@ -310,6 +403,95 @@ export default function UsersTab() {
           </tbody>
         </table>
       </div>
+
+      <Modal
+        open={confirmTemp !== null}
+        onClose={() => setConfirmTemp(null)}
+        title="Set a temporary password?"
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-charcoal">
+            This replaces <strong>{confirmTemp?.full_name ?? confirmTemp?.email}</strong>&apos;s
+            password with a one-time one that works for 7 days. They must choose a new password the
+            first time they use it, and every device they are signed in on is signed out. They will
+            be emailed that an administrator did this, and it is logged. You will see the password
+            once.
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" type="button" onClick={() => setConfirmTemp(null)}>
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              disabled={setTempPassword.isPending}
+              onClick={() => confirmTemp && setTempPassword.mutate(confirmTemp)}
+            >
+              {setTempPassword.isPending ? 'Setting…' : 'Set temporary password'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
+        open={confirmRemovePw !== null}
+        onClose={() => setConfirmRemovePw(null)}
+        title="Remove this password?"
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-charcoal">
+            <strong>{confirmRemovePw?.full_name ?? confirmRemovePw?.email}</strong> will no longer
+            have a password and every device they are signed in on is signed out. They can still
+            sign in with an emailed code, and set a new password afterwards. They will be emailed
+            that an administrator did this, and it is logged.
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" type="button" onClick={() => setConfirmRemovePw(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              type="button"
+              disabled={removePassword.isPending}
+              onClick={() => confirmRemovePw && removePassword.mutate(confirmRemovePw)}
+            >
+              {removePassword.isPending ? 'Removing…' : 'Remove password'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Closing this drops the only copy there is. */}
+      <Modal
+        open={shownTemp !== null}
+        onClose={() => setShownTemp(null)}
+        title="Temporary password"
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-charcoal">
+            Temporary password for <strong>{shownTemp?.who}</strong>. It works until{' '}
+            {shownTemp ? format(new Date(shownTemp.temp.expires_at), 'MMM d, yyyy') : ''}.
+          </p>
+          <div className="flex items-center gap-2">
+            <code
+              data-testid="temp-password"
+              className="flex-1 select-all break-all rounded-lg border border-sand bg-white px-3 py-2.5 font-mono text-lg tracking-wide text-charcoal"
+            >
+              {shownTemp?.temp.password}
+            </code>
+            <Button type="button" variant="ghost" onClick={() => void copyTemp()}>
+              <Copy size={14} /> Copy
+            </Button>
+          </div>
+          <p className="rounded-lg border border-clay/30 bg-clay/5 px-3 py-2 text-sm text-clay">
+            This is shown once. Give it to them by phone or in person, not by text or email.
+          </p>
+          <div className="flex justify-end">
+            <Button type="button" onClick={() => setShownTemp(null)}>
+              Done
+            </Button>
+          </div>
+        </div>
+      </Modal>
 
       <Modal
         open={confirmDelete !== null}

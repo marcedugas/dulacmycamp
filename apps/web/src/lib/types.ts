@@ -58,6 +58,11 @@ export interface User {
   /** Whether an admin password is set. Never the hash itself — the API only
    * ever reports its presence. Always false for guests. */
   has_password: boolean;
+  /** True while the password is a temporary one an admin issued. The account
+   *  can do nothing but choose a new password until this clears. */
+  must_change_password: boolean;
+  /** When an admin-issued temporary password stops working for sign-in. */
+  temp_password_expires_at: string | null;
   last_login_at: string | null;
   created_at: string;
   updated_at: string;
@@ -69,6 +74,19 @@ export interface DeleteSummary {
   deleted: boolean;
   journal_entry: boolean;
   checkout: boolean;
+}
+
+/** Result of choosing a password. Changing it ends every older session, so the
+ *  server hands back a fresh token for the one making the request. */
+export interface PasswordChanged extends MessageResponse {
+  token: string;
+}
+
+/** The one response that carries a plaintext password: an admin-issued
+ *  temporary one, shown once. */
+export interface TempPassword {
+  password: string;
+  expires_at: string;
 }
 
 /** The API's plain `{ message }` acknowledgement. */
