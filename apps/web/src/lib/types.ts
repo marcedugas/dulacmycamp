@@ -82,6 +82,23 @@ export interface PasswordChanged extends MessageResponse {
   token: string;
 }
 
+/** What permanently deleting an account would remove — counts only. */
+export interface DeletePreview {
+  role: Role;
+  /** Why the delete would be refused, or null if it may go ahead. */
+  refusal: string | null;
+  bookings_pending: number;
+  bookings_approved: number;
+  bookings_denied: number;
+  bookings_cancelled: number;
+  /** Pending or approved stays that have not finished yet. */
+  bookings_future: number;
+  messages: number;
+  stories: number;
+  catches: number;
+  photos: number;
+}
+
 /** The one response that carries a plaintext password: an admin-issued
  *  temporary one, shown once. */
 export interface TempPassword {

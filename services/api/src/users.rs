@@ -170,6 +170,7 @@ pub enum AuditAction {
     PasswordTempSet,
     PasswordRemoved,
     PasswordResetByUser,
+    UserDeleted,
 }
 
 impl AuditAction {
@@ -178,6 +179,7 @@ impl AuditAction {
             Self::PasswordTempSet => "password_temp_set",
             Self::PasswordRemoved => "password_removed",
             Self::PasswordResetByUser => "password_reset_by_user",
+            Self::UserDeleted => "user_deleted",
         }
     }
 }
@@ -215,18 +217,23 @@ pub async fn apply_password_change(
     .await
 }
 
+/// `target` is `None` when there is no row left to point at (a deletion).
+/// `detail` is free text and must never name a person.
 pub async fn write_audit(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     actor: Uuid,
-    target: Uuid,
+    target: Option<Uuid>,
     action: AuditAction,
+    detail: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO admin_audit_log (actor_id, target_user_id, action) VALUES ($1, $2, $3)",
+        "INSERT INTO admin_audit_log (actor_id, target_user_id, action, detail)
+         VALUES ($1, $2, $3, $4)",
     )
     .bind(actor)
     .bind(target)
     .bind(action.as_str())
+    .bind(detail)
     .execute(&mut **tx)
     .await
     .map(|_| ())
@@ -416,9 +423,9 @@ pub async fn clear_contact_admin(
 /// Admin roster: every user with the history hanging off them, for the Users
 /// tab.
 ///
-/// The three counts are the same three [`history_counts`] gates a hard delete
-/// on, sent up front so the Users tab can disable Delete on an account that
-/// has any, instead of offering a button whose only outcome is an error.
+/// The three counts are a quick read on how much history an account has.
+/// What a permanent delete would remove is spelled out per account by
+/// `crate::account_delete`'s preview.
 #[derive(Debug, Serialize, FromRow)]
 pub struct UserWithStats {
     #[sqlx(flatten)]
@@ -588,7 +595,14 @@ pub async fn set_temp_password(
 
     let mut tx = state.db.begin().await?;
     apply_password_change(&mut tx, id, Some(&hash), Some(expires_at)).await?;
-    write_audit(&mut tx, actor.id, id, AuditAction::PasswordTempSet).await?;
+    write_audit(
+        &mut tx,
+        actor.id,
+        Some(id),
+        AuditAction::PasswordTempSet,
+        None,
+    )
+    .await?;
     tx.commit().await?;
 
     // Ids only: no password, no hash, no address.
@@ -621,7 +635,14 @@ pub async fn remove_password(
 
     let mut tx = state.db.begin().await?;
     let updated = apply_password_change(&mut tx, id, None, None).await?;
-    write_audit(&mut tx, actor.id, id, AuditAction::PasswordRemoved).await?;
+    write_audit(
+        &mut tx,
+        actor.id,
+        Some(id),
+        AuditAction::PasswordRemoved,
+        None,
+    )
+    .await?;
     tx.commit().await?;
 
     tracing::info!(actor_id = %actor.id, target_id = %id, "password removed by admin");
@@ -654,61 +675,6 @@ fn require_blockable(user: &User) -> Result<(), AppError> {
     if user.is_admin() {
         return Err(AppError::BadRequest(
             "Admin accounts can't be blocked. Remove their admin role first, then block them."
-                .into(),
-        ));
-    }
-    Ok(())
-}
-
-/// Everything hanging off an account that a hard delete would destroy.
-///
-/// `booking_checkouts` is absent on purpose and not an oversight: a checkout
-/// row requires a booking, so `bookings == 0` already implies none exists.
-/// The same holds for journal entries, which are counted anyway because the
-/// admin panel shows the number.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, FromRow)]
-pub struct HistoryCounts {
-    pub bookings: i64,
-    pub journal: i64,
-    pub messages: i64,
-}
-
-impl HistoryCounts {
-    fn is_empty(&self) -> bool {
-        self.bookings == 0 && self.journal == 0 && self.messages == 0
-    }
-}
-
-async fn history_counts(db: &sqlx::PgPool, id: Uuid) -> Result<HistoryCounts, sqlx::Error> {
-    sqlx::query_as::<_, HistoryCounts>(
-        "SELECT (SELECT count(*) FROM bookings WHERE user_id = $1) AS bookings,
-                (SELECT count(*) FROM journal_entries WHERE user_id = $1) AS journal,
-                (SELECT count(*) FROM messages
-                  WHERE sender_id = $1 OR recipient_id = $1) AS messages",
-    )
-    .bind(id)
-    .fetch_one(db)
-    .await
-}
-
-/// Whether this account may be removed from the database outright.
-///
-/// Two gates. An admin is never deleted, for the same reason one is never
-/// blocked. And an account with any history at all is refused: the rows would
-/// go with it (bookings cascade, messages sent to them cascade) or the delete
-/// would fail on a foreign key, and either way a stay that actually happened
-/// stops being on the record. Blocking is what that case wants, so the error
-/// says so rather than just refusing.
-fn require_deletable(user: &User, history: &HistoryCounts) -> Result<(), AppError> {
-    if user.is_admin() {
-        return Err(AppError::BadRequest(
-            "Admin accounts can't be deleted. Remove their admin role first.".into(),
-        ));
-    }
-    if !history.is_empty() {
-        return Err(AppError::Conflict(
-            "This account has booking, journal or message history — use Block to prevent \
-             future access while keeping their record intact."
                 .into(),
         ));
     }
@@ -763,40 +729,6 @@ pub async fn unblock(
 
     tracing::info!(user_id = %id, email = %updated.email, "user unblocked");
     Ok(Json(updated))
-}
-
-/// `DELETE /users/{id}` — removes an account that never did anything.
-///
-/// The narrow case this exists for: a typo'd address, or someone who asked for
-/// a login code once and never came back. Anything with a trace is refused and
-/// pointed at Block.
-pub async fn remove(
-    State(state): State<Shared>,
-    AdminUser(_): AdminUser,
-    Path(id): Path<Uuid>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let target = find_by_id(&state.db, id)
-        .await?
-        .ok_or_else(|| AppError::NotFound("User not found.".into()))?;
-    let history = history_counts(&state.db, id).await?;
-    require_deletable(&target, &history)?;
-
-    let mut tx = state.db.begin().await?;
-    sqlx::query("DELETE FROM users WHERE id = $1")
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
-    // otp_codes are keyed by address, not by a foreign key, so an outstanding
-    // code would survive the row and still be redeemable by whoever
-    // self-registers that address next. Same reasoning as migration 0004.
-    sqlx::query("DELETE FROM otp_codes WHERE lower(email) = lower($1)")
-        .bind(&target.email)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-
-    tracing::info!(user_id = %id, email = %target.email, "user deleted");
-    Ok(Json(serde_json::json!({ "deleted": true })))
 }
 
 #[cfg(test)]
@@ -900,11 +832,10 @@ mod tests {
     }
 
     #[test]
-    fn the_family_role_can_be_blocked_and_deleted_like_any_non_admin() {
+    fn the_family_role_can_be_blocked_like_any_non_admin() {
         // Only admin accounts are shielded from blocking/deletion; promoting
         // someone to family must not accidentally shield them too.
         assert!(require_blockable(&user("user", false)).is_ok());
-        assert!(require_deletable(&user("user", false), &HistoryCounts::default()).is_ok());
     }
 
     // ─────────────── who may be blocked ───────────────
@@ -923,56 +854,6 @@ mod tests {
     async fn an_admin_cannot_be_blocked() {
         let err = require_blockable(&user("admin", false))
             .expect_err("blocking an admin must be refused");
-        let (status, body) = rendered(err).await;
-        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
-        assert!(body.contains("admin role"), "unhelpful refusal: {body}");
-    }
-
-    // ─────────────── who may be deleted ───────────────
-
-    #[test]
-    fn a_guest_with_nothing_attached_can_be_deleted() {
-        assert!(require_deletable(&user("guest", false), &HistoryCounts::default()).is_ok());
-        // Blocked already, and still empty — deleting is allowed, just rarely
-        // what anyone wants.
-        assert!(require_deletable(&user("guest", true), &HistoryCounts::default()).is_ok());
-    }
-
-    /// Any one of the three counts is enough to refuse, so a guest with only
-    /// messages is as protected as one with bookings.
-    #[tokio::test]
-    async fn any_history_at_all_refuses_the_delete() {
-        let counts = |bookings, journal, messages| HistoryCounts {
-            bookings,
-            journal,
-            messages,
-        };
-        let cases = [
-            ("a booking", counts(1, 0, 0)),
-            ("a journal entry", counts(0, 1, 0)),
-            ("a message", counts(0, 0, 1)),
-        ];
-        for (label, history) in cases {
-            let Err(err) = require_deletable(&user("guest", false), &history) else {
-                panic!("{label} must protect the account from deletion");
-            };
-            let (status, body) = rendered(err).await;
-            assert_eq!(status, axum::http::StatusCode::CONFLICT, "for {label}");
-            // The refusal has to point at the tool that does work here,
-            // otherwise the admin is left with a dead end.
-            assert!(
-                body.contains("Block"),
-                "for {label}, no pointer to Block: {body}"
-            );
-        }
-    }
-
-    /// Same reasoning as blocking: an admin is never deleted, however empty
-    /// their history is.
-    #[tokio::test]
-    async fn an_admin_cannot_be_deleted() {
-        let err = require_deletable(&user("admin", false), &HistoryCounts::default())
-            .expect_err("deleting an admin must be refused");
         let (status, body) = rendered(err).await;
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
         assert!(body.contains("admin role"), "unhelpful refusal: {body}");
