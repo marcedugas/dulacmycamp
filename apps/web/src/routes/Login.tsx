@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { ArrowLeft, Fish } from 'lucide-react';
 import { api, ApiError } from '../lib/api';
@@ -7,6 +7,7 @@ import { useAuth } from '../lib/auth';
 import { clearReturnTo, readReturnTo, safeReturnPath } from '../lib/returnTo';
 import type { AuthResponse } from '../lib/types';
 import { Button, Card, Field, Input } from '../components/ui';
+import { PasswordInput } from '../components/PasswordInput';
 
 /**
  * Two-step passwordless login. There is no sign-up: the first code request
@@ -120,14 +121,38 @@ export default function Login() {
               />
             </Field>
             <Field label="Password">
-              <Input
-                type="password"
+              <PasswordInput
+                aria-label="Password"
                 required
                 autoComplete="current-password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
               />
             </Field>
+            <div className="-mt-1 flex flex-col gap-1 text-sm">
+              {/* Carries the typed email and the return-to target along, so
+                  the next page starts where this one left off. */}
+              <Link
+                to="/forgot-password"
+                state={{ from: stateFrom, email }}
+                className="self-start font-semibold text-forest-600 hover:text-forest-700"
+              >
+                Forgot password?
+              </Link>
+              <p className="text-muted">
+                No password?{' '}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMode('otp');
+                    setPassword('');
+                  }}
+                  className="font-semibold text-forest-600 hover:text-forest-700"
+                >
+                  Use an emailed code instead.
+                </button>
+              </p>
+            </div>
             <Button type="submit" size="lg" className="w-full" disabled={busy || !email || !password}>
               {busy ? 'Signing in…' : 'Sign in'}
             </Button>

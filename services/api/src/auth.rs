@@ -34,6 +34,11 @@ pub struct Claims {
     pub role: String,
     pub exp: i64,
     pub iat: i64,
+    /// The user's `session_version` when this was issued. Tokens minted before
+    /// the field existed decode as 0, which is what every account starts at,
+    /// so nobody is signed out by the rollout.
+    #[serde(default)]
+    pub sv: i32,
 }
 
 pub fn issue_token(cfg: &crate::Config, user: &User) -> anyhow::Result<String> {
@@ -42,6 +47,7 @@ pub fn issue_token(cfg: &crate::Config, user: &User) -> anyhow::Result<String> {
         sub: user.id.to_string(),
         email: user.email.clone(),
         role: user.role.clone(),
+        sv: user.session_version,
         iat: now.timestamp(),
         exp: (now + Duration::hours(JWT_TTL_HOURS)).timestamp(),
     };
@@ -66,6 +72,12 @@ fn decode_token(cfg: &crate::Config, token: &str) -> Result<Claims, AppError> {
 
 /// A request carrying a valid Bearer token. Rejects with 401 otherwise.
 pub struct AuthUser(pub User);
+
+/// Like [`AuthUser`], but also accepted while a temporary password is still
+/// pending. Used by exactly the routes such an account needs: who-am-I and
+/// choosing a new password. Everything else takes [`AuthUser`] or
+/// [`AdminUser`], which refuse a pending account.
+pub struct PendingOkUser(pub User);
 
 /// A request from an admin. Rejects with 401 or 403.
 pub struct AdminUser(pub User);
@@ -97,7 +109,16 @@ async fn user_from_parts(parts: &Parts, state: &Shared) -> Result<Option<User>, 
     // Load from the database rather than trusting the claims: a role change, a
     // block, or a deleted account must take effect before the 24h token
     // expires.
-    users::find_by_id(&state.db, id).await.map_err(Into::into)
+    let user = users::find_by_id(&state.db, id).await?;
+
+    // A password change ends every session issued before it. Checked here, in
+    // the same re-read, so it costs nothing extra and no extractor can skip it.
+    match user {
+        Some(u) if u.session_version != claims.sv => Err(AppError::Unauthorized(
+            "Your session has ended. Please sign in again.".into(),
+        )),
+        other => Ok(other),
+    }
 }
 
 /// What a blocked account is told, wherever it is turned away.
@@ -127,6 +148,18 @@ fn require_active(user: User) -> Result<User, AppError> {
     Ok(user)
 }
 
+/// [`require_active`] plus the temporary-password lock: an account that has
+/// been given a temporary password may do nothing else until it chooses a
+/// real one. This is the server-side enforcement; the web client's
+/// "Choose a new password" screen is only the friendly face of it.
+fn require_ready(user: User) -> Result<User, AppError> {
+    let user = require_active(user)?;
+    if user.must_change_password {
+        return Err(AppError::PasswordChangeRequired);
+    }
+    Ok(user)
+}
+
 impl FromRequestParts<Shared> for AuthUser {
     type Rejection = AppError;
 
@@ -137,7 +170,21 @@ impl FromRequestParts<Shared> for AuthUser {
         let user = user_from_parts(parts, state)
             .await?
             .ok_or_else(|| AppError::Unauthorized("Sign in to continue.".into()))?;
-        Ok(AuthUser(require_active(user)?))
+        Ok(AuthUser(require_ready(user)?))
+    }
+}
+
+impl FromRequestParts<Shared> for PendingOkUser {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Shared,
+    ) -> Result<Self, Self::Rejection> {
+        let user = user_from_parts(parts, state)
+            .await?
+            .ok_or_else(|| AppError::Unauthorized("Sign in to continue.".into()))?;
+        Ok(PendingOkUser(require_active(user)?))
     }
 }
 
@@ -148,7 +195,7 @@ impl FromRequestParts<Shared> for AdminUser {
         parts: &mut Parts,
         state: &Shared,
     ) -> Result<Self, Self::Rejection> {
-        let user = require_active(
+        let user = require_ready(
             user_from_parts(parts, state)
                 .await?
                 .ok_or_else(|| AppError::Unauthorized("Sign in to continue.".into()))?,
@@ -174,9 +221,102 @@ impl FromRequestParts<Shared> for MaybeUser {
         Ok(MaybeUser(
             user_from_parts(parts, state)
                 .await?
-                .filter(|u| !u.is_blocked()),
+                // A pending temporary password reads as signed out too: the
+                // account can't use the site until it has chosen a new one,
+                // and the public pages have no business widening for it.
+                .filter(|u| !u.is_blocked() && !u.must_change_password),
         ))
     }
+}
+
+// ─────────────────────────── one-time codes ───────────────────────────
+//
+// One table, one generator, one mailer — and a `purpose` on every row, so a
+// code minted for signing in can only ever sign in and a code minted for a
+// password reset can only ever reset one. Every lookup below names its
+// purpose; there is deliberately no purpose-less variant to reach for.
+
+const PURPOSE_LOGIN: &str = "login";
+const PURPOSE_RESET: &str = "password_reset";
+
+/// Wrong guesses a single code survives. Six digits is a million possibilities;
+/// without a cap a script could walk the space inside the ten minutes.
+const OTP_MAX_ATTEMPTS: i32 = 5;
+
+/// Mints a fresh code for `email` and retires any outstanding one of the same
+/// purpose, so only the newest works. Returns the plaintext to be mailed.
+async fn issue_code(db: &sqlx::PgPool, email: &str, purpose: &str) -> Result<String, sqlx::Error> {
+    let code = format!("{:06}", rand::thread_rng().gen_range(0..1_000_000));
+    let expires_at = Utc::now() + Duration::minutes(OTP_TTL_MINUTES);
+
+    let mut tx = db.begin().await?;
+    sqlx::query(
+        "UPDATE otp_codes SET used = true WHERE email = $1 AND purpose = $2 AND used = false",
+    )
+    .bind(email)
+    .bind(purpose)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("INSERT INTO otp_codes (email, code, purpose, expires_at) VALUES ($1, $2, $3, $4)")
+        .bind(email)
+        .bind(&code)
+        .bind(purpose)
+        .bind(expires_at)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(code)
+}
+
+/// Checks `code` against the newest live code of this purpose for `email`, and
+/// consumes it on a match. `false` for every kind of miss — nothing issued,
+/// expired, already used, out of attempts, wrong — so callers can't tell them
+/// apart and neither can a caller's caller.
+///
+/// The attempt is claimed in the same statement that selects the code, before
+/// the comparison, so a burst of parallel guesses cannot all slip in under the
+/// cap: Postgres serialises the updates on the row and the sixth finds
+/// `attempts` already at the limit.
+async fn redeem_code(
+    db: &sqlx::PgPool,
+    email: &str,
+    code: &str,
+    purpose: &str,
+) -> Result<bool, sqlx::Error> {
+    let claimed: Option<(uuid::Uuid, String)> = sqlx::query_as(
+        "UPDATE otp_codes SET attempts = attempts + 1
+          WHERE id = (SELECT id FROM otp_codes
+                       WHERE email = $1 AND purpose = $2 AND used = false AND expires_at > now()
+                       ORDER BY created_at DESC LIMIT 1)
+            AND attempts < $3
+      RETURNING id, code",
+    )
+    .bind(email)
+    .bind(purpose)
+    .bind(OTP_MAX_ATTEMPTS)
+    .fetch_optional(db)
+    .await?;
+
+    let Some((id, stored)) = claimed else {
+        return Ok(false);
+    };
+    if !constant_time_eq(stored.as_bytes(), code.as_bytes()) {
+        return Ok(false);
+    }
+    // Single use: the `used = false` guard makes a double-submit race lose.
+    let consumed = sqlx::query("UPDATE otp_codes SET used = true WHERE id = $1 AND used = false")
+        .bind(id)
+        .execute(db)
+        .await?
+        .rows_affected();
+    Ok(consumed == 1)
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 // ─────────────────────────── handlers ───────────────────────────
@@ -241,22 +381,7 @@ pub async fn request_otp(
         }
     };
 
-    let code = format!("{:06}", rand::thread_rng().gen_range(0..1_000_000));
-    let expires_at = Utc::now() + Duration::minutes(OTP_TTL_MINUTES);
-
-    let mut tx = state.db.begin().await?;
-    // Retire any outstanding codes so only the newest one works.
-    sqlx::query("UPDATE otp_codes SET used = true WHERE email = $1 AND used = false")
-        .bind(&email)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("INSERT INTO otp_codes (email, code, expires_at) VALUES ($1, $2, $3)")
-        .bind(&email)
-        .bind(&code)
-        .bind(expires_at)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
+    let code = issue_code(&state.db, &email, PURPOSE_LOGIN).await?;
 
     tracing::debug!(user_id = %user.id, "issued login code");
     email::spawn(
@@ -289,26 +414,11 @@ pub async fn verify_otp(
     let email = body.email.trim().to_lowercase();
     let code = body.code.trim();
 
-    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
-        "SELECT id FROM otp_codes
-         WHERE email = $1 AND code = $2 AND used = false AND expires_at > now()
-         ORDER BY created_at DESC LIMIT 1",
-    )
-    .bind(&email)
-    .bind(code)
-    .fetch_optional(&state.db)
-    .await?;
-
-    let Some((otp_id,)) = row else {
+    if !redeem_code(&state.db, &email, code, PURPOSE_LOGIN).await? {
         return Err(AppError::Unauthorized(
             "That code is invalid or has expired.".into(),
         ));
-    };
-
-    sqlx::query("UPDATE otp_codes SET used = true WHERE id = $1")
-        .bind(otp_id)
-        .execute(&state.db)
-        .await?;
+    }
 
     let user = sqlx::query_as::<_, User>(&format!(
         "UPDATE users SET last_login_at = now() WHERE lower(email) = lower($1)
@@ -323,7 +433,8 @@ pub async fn verify_otp(
     Ok(Json(AuthResponse { token, user }))
 }
 
-pub async fn me(AuthUser(user): AuthUser) -> Json<User> {
+/// Who-am-I. One of the two routes a pending temporary password may reach.
+pub async fn me(PendingOkUser(user): PendingOkUser) -> Json<User> {
     Json(user)
 }
 
@@ -336,9 +447,20 @@ pub async fn me(AuthUser(user): AuthUser) -> Json<User> {
 // downstream can tell how someone signed in, and nothing downstream has to
 // care.
 
-#[derive(Debug, Deserialize)]
+// No `Debug` on anything that carries a password: a stray `{:?}` must not be
+// able to put one in a log.
+#[derive(Deserialize)]
 pub struct SetPassword {
     pub password: String,
+}
+
+#[derive(Serialize)]
+pub struct PasswordChanged {
+    pub message: String,
+    /// A fresh session. Changing a password ends every session issued before
+    /// it — including the one making this request — so the caller gets a
+    /// replacement for its own.
+    pub token: String,
 }
 
 /// `POST /auth/set-password` — sets the caller's own password.
@@ -346,16 +468,34 @@ pub struct SetPassword {
 /// The bootstrap is deliberate: you need a live session to get here, and the
 /// only way to a first session is an emailed code. So a password can only ever
 /// be added by someone who has already proved they hold the mailbox.
+///
+/// Also the way out of a temporary password: it is the one write a pending
+/// account may make. Success clears the flag and the expiry.
 pub async fn set_password(
     State(state): State<Shared>,
-    AuthUser(user): AuthUser,
+    PendingOkUser(user): PendingOkUser,
     Json(body): Json<SetPassword>,
-) -> ApiResult<Json<MessageResponse>> {
+) -> ApiResult<Json<PasswordChanged>> {
     require_password_eligible(&user)?;
 
     let hash = password::hash(&body.password).map_err(AppError::BadRequest)?;
+
+    // An admin generated the temporary password, so an admin may know it. Not
+    // being allowed to "change" it to itself is what makes the change real.
+    if user.must_change_password
+        && let Some(found) = users::find_with_password(&state.db, &user.email).await?
+        && let Some(current) = found.password_hash.as_deref()
+        && password::verify(&body.password, current)
+    {
+        return Err(AppError::BadRequest(
+            "Choose a password different from the temporary one.".into(),
+        ));
+    }
+
     let replacing = user.has_password;
-    users::set_password_hash(&state.db, user.id, &hash).await?;
+    let mut tx = state.db.begin().await?;
+    let updated = users::apply_password_change(&mut tx, user.id, Some(&hash), None).await?;
+    tx.commit().await?;
 
     // Not a confirmation step — the change has already happened — but the one
     // signal that would tell the account's owner their session had been taken
@@ -367,12 +507,14 @@ pub async fn set_password(
         email_templates::password_changed(&state.cfg.frontend_url),
     );
 
-    Ok(Json(MessageResponse {
+    let token = issue_token(&state.cfg, &updated).map_err(AppError::Internal)?;
+    Ok(Json(PasswordChanged {
         message: if replacing {
             "Password updated.".into()
         } else {
             "Password set.".into()
         },
+        token,
     }))
 }
 
@@ -391,7 +533,7 @@ fn require_password_eligible(_user: &User) -> Result<(), AppError> {
     Ok(())
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct LoginPassword {
     pub email: String,
     pub password: String,
@@ -443,7 +585,7 @@ pub async fn login_password(
         None => password::verify_dummy(&body.password),
     };
 
-    let id = authenticate(found.as_ref(), password_matches)?.id;
+    let id = authenticate(found.as_ref(), password_matches, Utc::now())?.id;
 
     // Same session the OTP path hands out, recorded the same way.
     let user = sqlx::query_as::<_, User>(&format!(
@@ -472,15 +614,201 @@ pub async fn login_password(
 /// than pretending a code was sent. Nothing new leaks: the same fact is
 /// already obtainable from that public, unauthenticated endpoint with no
 /// password guess required at all.
+///
+/// An expired temporary password is the one specific refusal besides a block,
+/// and it is only reachable *after* the password matched — so it tells nobody
+/// anything who didn't already hold the temporary password.
 fn authenticate(
     found: Option<&users::UserWithHash>,
     password_matches: bool,
+    now: chrono::DateTime<Utc>,
 ) -> Result<&User, AppError> {
     match found {
         Some(f) if f.user.is_blocked() => Err(blocked()),
-        Some(f) if f.password_hash.is_some() && password_matches => Ok(&f.user),
+        Some(f) if f.password_hash.is_some() && password_matches => {
+            let expired = f.user.must_change_password
+                && f.user.temp_password_expires_at.is_some_and(|t| t <= now);
+            if expired {
+                Err(AppError::Unauthorized(
+                    "This temporary password has expired. Ask an admin for a new one, or use an \
+                     emailed code."
+                        .into(),
+                ))
+            } else {
+                Ok(&f.user)
+            }
+        }
         _ => Err(invalid_credentials()),
     }
+}
+
+// ─────────────────────────── forgot / reset password ───────────────────────────
+
+/// The one answer `forgot_password` gives, whatever the address.
+const FORGOT_PASSWORD_REPLY: &str = "If that email has an account, we sent a code.";
+
+#[derive(Deserialize)]
+pub struct ForgotPassword {
+    pub email: String,
+}
+
+/// `POST /auth/forgot-password` — public.
+///
+/// Identical response whether or not the address has an account, and
+/// identical *timing* by construction: everything that depends on the account
+/// (the lookup, the code, the email) happens in a background task after the
+/// reply is already decided. The only things checked before replying — format,
+/// and the two rate limits — depend on the caller and the address string, never
+/// on the database.
+///
+/// Reuses the request-OTP limiters rather than adding new ones. The per-email
+/// budget is keyed `reset:<email>` so asking for a reset doesn't use up the
+/// login-code budget for the same address (they're separate things the person
+/// may reasonably do back to back); the per-IP budget is shared, since that is
+/// the one that caps mail spend. Hitting the per-email limit is answered with
+/// the same generic reply and nothing sent — a distinct message there would be
+/// harmless for enumeration (the key exists for every string) but would still
+/// be one more thing to get wrong.
+pub async fn forgot_password(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    Json(body): Json<ForgotPassword>,
+) -> ApiResult<Json<MessageResponse>> {
+    let email = body.email.trim().to_lowercase();
+    if !email.contains('@') || email.len() < 5 {
+        return Err(AppError::BadRequest("Enter a valid email address.".into()));
+    }
+
+    let ip = client_ip(&headers, Some(peer));
+    if let Err(retry) = state.limits.otp_per_ip.check(&ip) {
+        tracing::warn!(%retry, "password reset request rate limited by ip");
+        return Err(AppError::TooManyRequests(format!(
+            "Too many requests from this network. Try again in {} minute{}.",
+            retry.div_ceil(60),
+            if retry.div_ceil(60) == 1 { "" } else { "s" },
+        )));
+    }
+    let within_email_budget = state
+        .limits
+        .otp_per_email
+        .check(&format!("reset:{email}"))
+        .is_ok();
+
+    if within_email_budget {
+        let state = state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = send_reset_code(&state, &email).await {
+                tracing::error!(error = ?e, "could not issue a password reset code");
+            }
+        });
+    }
+
+    Ok(Json(MessageResponse {
+        message: FORGOT_PASSWORD_REPLY.into(),
+    }))
+}
+
+/// Issues and mails a reset code if — and only if — the address belongs to an
+/// account in good standing. Silent otherwise.
+async fn send_reset_code(state: &Shared, email: &str) -> anyhow::Result<()> {
+    let Some(user) = users::find_by_email(&state.db, email).await? else {
+        return Ok(());
+    };
+    if user.is_blocked() {
+        return Ok(());
+    }
+    let code = issue_code(&state.db, email, PURPOSE_RESET).await?;
+    tracing::debug!(user_id = %user.id, "issued password reset code");
+    email::send(
+        state,
+        email,
+        &email_templates::password_reset_code(&code, OTP_TTL_MINUTES),
+    )
+    .await
+}
+
+#[derive(Deserialize)]
+pub struct ResetPassword {
+    pub email: String,
+    pub code: String,
+    pub new_password: String,
+}
+
+/// The single answer to every way a reset can fail on the code side.
+fn invalid_reset_code() -> AppError {
+    AppError::BadRequest(
+        "That code is invalid or has expired. Request a new one and try again.".into(),
+    )
+}
+
+/// `POST /auth/reset-password` — public. Verifies a reset code and sets the
+/// new password in one step, then signs the person in.
+///
+/// Signing in is what the emailed-code route already does for the same proof
+/// (control of the mailbox), so it is not a new capability — and it means the
+/// person lands where they were headed instead of at a second login form.
+pub async fn reset_password(
+    State(state): State<Shared>,
+    headers: HeaderMap,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    Json(body): Json<ResetPassword>,
+) -> ApiResult<Json<AuthResponse>> {
+    let email = body.email.trim().to_lowercase();
+    let code = body.code.trim();
+
+    // The password rules are checked first and don't touch the code: a typo in
+    // the new password must not cost a correct code, and the answer depends
+    // only on what the caller typed, never on the account.
+    password::validate(&body.new_password).map_err(AppError::BadRequest)?;
+
+    let ip = client_ip(&headers, Some(peer));
+    if let Err(retry) = state.limits.reset_per_ip.check(&ip) {
+        tracing::warn!(%retry, "password reset rate limited by ip");
+        return Err(too_many_attempts(retry));
+    }
+
+    if !redeem_code(&state.db, &email, code, PURPOSE_RESET).await? {
+        return Err(invalid_reset_code());
+    }
+
+    // The code is spent. A blocked or vanished account gets the same refusal as
+    // a bad code — nothing here may say which it was.
+    let user = match users::find_by_email(&state.db, &email).await? {
+        Some(u) if !u.is_blocked() => u,
+        _ => return Err(invalid_reset_code()),
+    };
+
+    let hash = password::hash(&body.new_password).map_err(AppError::BadRequest)?;
+    let mut tx = state.db.begin().await?;
+    users::apply_password_change(&mut tx, user.id, Some(&hash), None).await?;
+    users::write_audit(
+        &mut tx,
+        user.id,
+        user.id,
+        users::AuditAction::PasswordResetByUser,
+    )
+    .await?;
+    let updated = sqlx::query_as::<_, User>(&format!(
+        "UPDATE users SET last_login_at = now() WHERE id = $1 RETURNING {USER_COLUMNS}"
+    ))
+    .bind(user.id)
+    .fetch_one(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    tracing::info!(user_id = %user.id, "password reset with an emailed code");
+    email::spawn(
+        state.clone(),
+        user.email.clone(),
+        email_templates::password_changed(&state.cfg.frontend_url),
+    );
+
+    let token = issue_token(&state.cfg, &updated).map_err(AppError::Internal)?;
+    Ok(Json(AuthResponse {
+        token,
+        user: updated,
+    }))
 }
 
 fn too_many_attempts(retry: u64) -> AppError {
@@ -517,6 +845,9 @@ mod tests {
             blocked_at: None,
             avatar_url: None,
             has_password,
+            must_change_password: false,
+            temp_password_expires_at: None,
+            session_version: 0,
             last_login_at: None,
             created_at: now,
             updated_at: now,
@@ -555,26 +886,29 @@ mod tests {
 
         let cases: Vec<(&str, AppError)> = vec![
             // No account at that address at all.
-            ("unknown email", authenticate(None, false).unwrap_err()),
+            (
+                "unknown email",
+                authenticate(None, false, Utc::now()).unwrap_err(),
+            ),
             // A guest, the ordinary case: no password to check.
             (
                 "guest with no password",
-                authenticate(Some(&row("guest", None)), false).unwrap_err(),
+                authenticate(Some(&row("guest", None)), false, Utc::now()).unwrap_err(),
             ),
             // A family account that has one, and got it wrong.
             (
                 "user role with the wrong password",
-                authenticate(Some(&row("user", Some(hash))), false).unwrap_err(),
+                authenticate(Some(&row("user", Some(hash))), false, Utc::now()).unwrap_err(),
             ),
             // An admin who has never set one.
             (
                 "admin with no password set",
-                authenticate(Some(&row("admin", None)), false).unwrap_err(),
+                authenticate(Some(&row("admin", None)), false, Utc::now()).unwrap_err(),
             ),
             // An admin who has one, and got it wrong.
             (
                 "admin with the wrong password",
-                authenticate(Some(&row("admin", Some(hash))), false).unwrap_err(),
+                authenticate(Some(&row("admin", Some(hash))), false, Utc::now()).unwrap_err(),
             ),
         ];
 
@@ -615,7 +949,7 @@ mod tests {
     fn an_admin_with_a_matching_password_authenticates() {
         let hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let entry = row("admin", Some(hash));
-        assert!(authenticate(Some(&entry), true).is_ok());
+        assert!(authenticate(Some(&entry), true, Utc::now()).is_ok());
     }
 
     /// The point of this whole change: a guest, not just an admin, can now
@@ -624,7 +958,7 @@ mod tests {
     fn a_guest_with_a_matching_password_authenticates() {
         let hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let entry = row("guest", Some(hash));
-        assert!(authenticate(Some(&entry), true).is_ok());
+        assert!(authenticate(Some(&entry), true, Utc::now()).is_ok());
     }
 
     /// The third and last role, for the same reason.
@@ -632,7 +966,7 @@ mod tests {
     fn a_family_user_with_a_matching_password_authenticates() {
         let hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let entry = row("user", Some(hash));
-        assert!(authenticate(Some(&entry), true).is_ok());
+        assert!(authenticate(Some(&entry), true, Utc::now()).is_ok());
     }
 
     /// Was `a_demoted_admin_cannot_use_a_leftover_hash` before password login
@@ -643,7 +977,7 @@ mod tests {
     #[test]
     fn a_former_admins_leftover_hash_still_works_now_that_guests_are_eligible() {
         let hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        assert!(authenticate(Some(&row("guest", Some(hash))), true).is_ok());
+        assert!(authenticate(Some(&row("guest", Some(hash))), true, Utc::now()).is_ok());
     }
 
     /// A blocked account is refused even with the exact right password, and
@@ -655,10 +989,84 @@ mod tests {
         let mut entry = row("guest", Some(hash));
         entry.user.blocked_at = Some(Utc::now());
 
-        let err = authenticate(Some(&entry), true).expect_err("a blocked account must be refused");
+        let err = authenticate(Some(&entry), true, Utc::now())
+            .expect_err("a blocked account must be refused");
         let (status, body) = rendered(err).await;
         assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
         assert!(String::from_utf8(body).unwrap().contains("camp owner"));
+    }
+
+    // ─────────────── temporary passwords ───────────────
+
+    const HASH: &str =
+        "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn temp_row(expires_in: chrono::Duration) -> UserWithHash {
+        let mut r = row("guest", Some(HASH));
+        r.user.must_change_password = true;
+        r.user.temp_password_expires_at = Some(Utc::now() + expires_in);
+        r
+    }
+
+    #[test]
+    fn a_live_temporary_password_signs_in() {
+        let r = temp_row(chrono::Duration::days(1));
+        assert!(authenticate(Some(&r), true, Utc::now()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn an_expired_temporary_password_is_refused_with_a_plain_message() {
+        let r = temp_row(chrono::Duration::seconds(-1));
+        let (status, body) = rendered(authenticate(Some(&r), true, Utc::now()).unwrap_err()).await;
+        assert_eq!(status, axum::http::StatusCode::UNAUTHORIZED);
+        let text = String::from_utf8(body).unwrap();
+        assert!(text.contains("temporary password has expired"), "{text}");
+        assert!(text.contains("emailed code"), "{text}");
+    }
+
+    /// The expiry message must not become a way to probe: with the *wrong*
+    /// password an expired-temp account answers exactly like any other.
+    #[tokio::test]
+    async fn the_expiry_message_is_only_reachable_with_the_right_password() {
+        let expired = temp_row(chrono::Duration::seconds(-1));
+        let got = rendered(authenticate(Some(&expired), false, Utc::now()).unwrap_err()).await;
+        let unknown = rendered(authenticate(None, false, Utc::now()).unwrap_err()).await;
+        assert_eq!(got, unknown);
+    }
+
+    #[tokio::test]
+    async fn a_pending_password_change_is_refused_by_the_gate_with_its_own_code() {
+        let mut u = user("guest", false);
+        u.must_change_password = true;
+        let (status, body) = rendered(require_ready(u.clone()).unwrap_err()).await;
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert!(
+            String::from_utf8(body)
+                .unwrap()
+                .contains("PASSWORD_CHANGE_REQUIRED")
+        );
+        // The exempt routes use `require_active`, which lets it through.
+        assert!(require_active(u).is_ok());
+        assert!(require_ready(user("guest", false)).is_ok());
+    }
+
+    #[test]
+    fn a_pending_admin_is_gated_too() {
+        let mut u = user("admin", false);
+        u.must_change_password = true;
+        assert!(require_ready(u).is_err());
+    }
+
+    #[test]
+    fn constant_time_eq_behaves_like_eq() {
+        assert!(constant_time_eq(b"123456", b"123456"));
+        assert!(!constant_time_eq(b"123456", b"123457"));
+        assert!(!constant_time_eq(b"123456", b"12345"));
+    }
+
+    #[test]
+    fn login_and_reset_codes_have_different_purposes() {
+        assert_ne!(PURPOSE_LOGIN, PURPOSE_RESET);
     }
 
     // ─────────────── who may set a password ───────────────

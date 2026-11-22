@@ -43,6 +43,17 @@ pub struct User {
     /// Computed in SQL by `USER_COLUMNS` so `password_hash` itself is not in
     /// any query this struct is read from, and so cannot be serialised out.
     pub has_password: bool,
+    /// Set while the password is a temporary one an admin issued: the account
+    /// may do nothing but choose a new password until it has. Enforced in
+    /// `crate::auth`'s extractors, not only in the UI.
+    pub must_change_password: bool,
+    /// When an admin-issued temporary password stops working for sign-in.
+    /// `None` for an ordinary password.
+    pub temp_password_expires_at: Option<DateTime<Utc>>,
+    /// Bumped whenever the password changes; a token minted under an older
+    /// value is refused. Never serialised — it is server bookkeeping.
+    #[serde(skip)]
+    pub session_version: i32,
     pub last_login_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -108,6 +119,8 @@ pub const USER_COLUMNS: &str = "id, email, full_name, phone, home_city, home_sta
                                 mailing_address, relationship, boat_info, notes, \
                                 role, is_owner, blocked_at, avatar_url, \
                                 (password_hash IS NOT NULL) AS has_password, \
+                                must_change_password, temp_password_expires_at, \
+                                session_version, \
                                 last_login_at, created_at, updated_at";
 
 pub async fn find_by_id(db: &sqlx::PgPool, id: Uuid) -> Result<Option<User>, sqlx::Error> {
@@ -150,14 +163,73 @@ pub async fn find_with_password(
     .await
 }
 
-/// Stores (or replaces) an account's password hash.
-pub async fn set_password_hash(db: &sqlx::PgPool, id: Uuid, hash: &str) -> Result<(), sqlx::Error> {
-    sqlx::query("UPDATE users SET password_hash = $2 WHERE id = $1")
-        .bind(id)
-        .bind(hash)
-        .execute(db)
-        .await
-        .map(|_| ())
+/// What a password change was, for the audit log. Strings match the CHECK
+/// constraint in migration 0019.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditAction {
+    PasswordTempSet,
+    PasswordRemoved,
+    PasswordResetByUser,
+}
+
+impl AuditAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PasswordTempSet => "password_temp_set",
+            Self::PasswordRemoved => "password_removed",
+            Self::PasswordResetByUser => "password_reset_by_user",
+        }
+    }
+}
+
+/// The one write path for every password change: user-chosen (profile or
+/// reset), admin temporary, admin removal.
+///
+/// Always ends every existing session (`session_version + 1`), in the same
+/// statement as the change itself so there is no window where the new
+/// password exists and the old sessions still work. Returns the updated row,
+/// which carries the new `session_version` for minting a fresh token.
+///
+/// `temp_expires_at` of `Some` marks the password temporary
+/// (`must_change_password = true`); `None` clears both fields. `hash` of
+/// `None` removes the password.
+pub async fn apply_password_change(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: Uuid,
+    hash: Option<&str>,
+    temp_expires_at: Option<DateTime<Utc>>,
+) -> Result<User, sqlx::Error> {
+    sqlx::query_as::<_, User>(&format!(
+        "UPDATE users
+            SET password_hash = $2,
+                must_change_password = ($3::timestamptz IS NOT NULL),
+                temp_password_expires_at = $3,
+                session_version = session_version + 1
+          WHERE id = $1
+      RETURNING {USER_COLUMNS}"
+    ))
+    .bind(id)
+    .bind(hash)
+    .bind(temp_expires_at)
+    .fetch_one(&mut **tx)
+    .await
+}
+
+pub async fn write_audit(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    actor: Uuid,
+    target: Uuid,
+    action: AuditAction,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO admin_audit_log (actor_id, target_user_id, action) VALUES ($1, $2, $3)",
+    )
+    .bind(actor)
+    .bind(target)
+    .bind(action.as_str())
+    .execute(&mut **tx)
+    .await
+    .map(|_| ())
 }
 
 /// Whether this account has ever had a booking approved — the "has actually
@@ -378,6 +450,7 @@ pub async fn list_all(
                 u.mailing_address, u.relationship, u.boat_info, u.notes,
                 u.role, u.is_owner, u.blocked_at, u.avatar_url,
                 (u.password_hash IS NOT NULL) AS has_password,
+                u.must_change_password, u.temp_password_expires_at, u.session_version,
                 u.last_login_at, u.created_at, u.updated_at,
                 {ROSTER_COUNTS}
          FROM users u
@@ -453,6 +526,115 @@ pub async fn update_owner(
     .ok_or_else(|| AppError::NotFound("User not found.".into()))?;
 
     Ok(Json(updated))
+}
+
+// ─────────────────────── admin password tools ───────────────────────
+//
+// Any admin may do this to any other account, the owner's included. That is a
+// deliberate decision (the person who built the site has to be able to help
+// the owner), and it is made safe by two things rather than by a restriction:
+// the affected person is always emailed, and every use is written to
+// `admin_audit_log`. An admin can never see or choose anyone's real password:
+// a temporary one is generated here and has to be replaced at first use.
+
+/// How long a temporary password can be used to sign in.
+const TEMP_PASSWORD_TTL_DAYS: i64 = 7;
+const TEMP_PASSWORD_LEN: usize = 14;
+/// No 0/O/1/l/I — a password read out over the phone must survive being
+/// transcribed.
+const TEMP_PASSWORD_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+
+fn generate_temp_password() -> String {
+    use rand::{Rng, rngs::OsRng};
+    let mut rng = OsRng;
+    (0..TEMP_PASSWORD_LEN)
+        .map(|_| TEMP_PASSWORD_ALPHABET[rng.gen_range(0..TEMP_PASSWORD_ALPHABET.len())] as char)
+        .collect()
+}
+
+/// Admins use the profile page for their own password, so these tools never
+/// need to reason about acting on yourself.
+fn require_not_self(actor: &User, target: Uuid) -> Result<(), AppError> {
+    if actor.id == target {
+        return Err(AppError::BadRequest(
+            "Change your own password from your profile page.".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// The only response in the API that carries a plaintext password.
+#[derive(Serialize)]
+pub struct TempPasswordResponse {
+    pub password: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// `POST /users/{id}/temp-password`
+pub async fn set_temp_password(
+    State(state): State<Shared>,
+    AdminUser(actor): AdminUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<impl axum::response::IntoResponse> {
+    require_not_self(&actor, id)?;
+    let target = find_by_id(&state.db, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found.".into()))?;
+
+    let password = generate_temp_password();
+    let hash =
+        crate::password::hash(&password).map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
+    let expires_at = Utc::now() + chrono::Duration::days(TEMP_PASSWORD_TTL_DAYS);
+
+    let mut tx = state.db.begin().await?;
+    apply_password_change(&mut tx, id, Some(&hash), Some(expires_at)).await?;
+    write_audit(&mut tx, actor.id, id, AuditAction::PasswordTempSet).await?;
+    tx.commit().await?;
+
+    // Ids only: no password, no hash, no address.
+    tracing::info!(actor_id = %actor.id, target_id = %id, "temporary password set by admin");
+    crate::email::spawn(
+        state.clone(),
+        target.email,
+        crate::email_templates::admin_temp_password_notice(&state.cfg.frontend_url),
+    );
+
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(TempPasswordResponse {
+            password,
+            expires_at,
+        }),
+    ))
+}
+
+/// `POST /users/{id}/remove-password`
+pub async fn remove_password(
+    State(state): State<Shared>,
+    AdminUser(actor): AdminUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<impl axum::response::IntoResponse> {
+    require_not_self(&actor, id)?;
+    let target = find_by_id(&state.db, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("User not found.".into()))?;
+
+    let mut tx = state.db.begin().await?;
+    let updated = apply_password_change(&mut tx, id, None, None).await?;
+    write_audit(&mut tx, actor.id, id, AuditAction::PasswordRemoved).await?;
+    tx.commit().await?;
+
+    tracing::info!(actor_id = %actor.id, target_id = %id, "password removed by admin");
+    crate::email::spawn(
+        state.clone(),
+        target.email,
+        crate::email_templates::admin_password_removed_notice(&state.cfg.frontend_url),
+    );
+
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(updated),
+    ))
 }
 
 // ─────────────────────── blocking and deletion ───────────────────────
@@ -650,10 +832,45 @@ mod tests {
             blocked_at: blocked.then_some(now),
             avatar_url: None,
             has_password: false,
+            must_change_password: false,
+            temp_password_expires_at: None,
+            session_version: 0,
             last_login_at: None,
             created_at: now,
             updated_at: now,
         }
+    }
+
+    // ─────────────── temporary passwords ───────────────
+
+    #[test]
+    fn a_generated_temp_password_is_long_unambiguous_and_valid() {
+        for _ in 0..200 {
+            let p = generate_temp_password();
+            assert!(p.len() >= 12, "too short: {}", p.len());
+            assert!(
+                crate::password::validate(&p).is_ok(),
+                "must pass the normal rules"
+            );
+            assert!(
+                p.chars()
+                    .all(|c| !"0O1lI".contains(c) && c.is_ascii_alphanumeric()),
+                "ambiguous or odd character in a generated password"
+            );
+        }
+    }
+
+    #[test]
+    fn generated_temp_passwords_differ() {
+        assert_ne!(generate_temp_password(), generate_temp_password());
+    }
+
+    #[tokio::test]
+    async fn an_admin_cannot_use_the_tools_on_themselves() {
+        let mut me = user("admin", false);
+        me.id = Uuid::new_v4();
+        assert!(require_not_self(&me, me.id).is_err());
+        assert!(require_not_self(&me, Uuid::new_v4()).is_ok());
     }
 
     /// The status and body a caller actually receives.

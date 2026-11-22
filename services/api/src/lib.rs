@@ -249,6 +249,11 @@ pub fn router(state: Shared) -> Router {
         .route("/auth/login-password", post(auth::login_password))
         .route("/auth/set-password", post(auth::set_password))
         .route("/auth/me", get(auth::me))
+        // Forgotten password: an emailed reset code (a different purpose from
+        // a login code — they are not interchangeable), then the new password
+        // in the same step that consumes it.
+        .route("/auth/forgot-password", post(auth::forgot_password))
+        .route("/auth/reset-password", post(auth::reset_password))
         // ── bookings ──
         // The two token routes sit above `/bookings/{id}` on purpose: they are
         // unauthenticated and matched by a literal segment.
@@ -299,6 +304,11 @@ pub fn router(state: Shared) -> Router {
         // delete is only permitted on an account with no history at all.
         .route("/users/{id}/block", put(users::block))
         .route("/users/{id}/unblock", put(users::unblock))
+        // Admin help for someone stuck: a server-generated temporary password
+        // (shown once) or removing the password. Both email the person and
+        // write the audit log. See the notes above `users::set_temp_password`.
+        .route("/users/{id}/temp-password", post(users::set_temp_password))
+        .route("/users/{id}/remove-password", post(users::remove_password))
         .route("/users/{id}", delete(users::remove))
         // ── calendar annotations ──
         .route(
@@ -520,6 +530,11 @@ pub enum AppError {
     Conflict(String),
     #[error("{0}")]
     TooManyRequests(String),
+    /// A temporary password is still in force: the account may only choose a
+    /// new one. A distinct code so the web client can route to that screen
+    /// instead of showing an error.
+    #[error("You need to choose a new password before you can do anything else.")]
+    PasswordChangeRequired,
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -533,6 +548,7 @@ impl AppError {
             Self::NotFound(_) => (StatusCode::NOT_FOUND, "NOT_FOUND"),
             Self::Conflict(_) => (StatusCode::CONFLICT, "CONFLICT"),
             Self::TooManyRequests(_) => (StatusCode::TOO_MANY_REQUESTS, "TOO_MANY_REQUESTS"),
+            Self::PasswordChangeRequired => (StatusCode::FORBIDDEN, "PASSWORD_CHANGE_REQUIRED"),
             Self::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL"),
         }
     }

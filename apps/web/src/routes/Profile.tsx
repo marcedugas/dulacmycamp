@@ -4,13 +4,11 @@ import { toast } from 'sonner';
 import { KeyRound } from 'lucide-react';
 import { Button, Card, Field, Input, PageHeader, Textarea } from '../components/ui';
 import { ContactFields, contactFromUser, type ContactValues } from '../components/ContactFields';
-import { api, ApiError } from '../lib/api';
+import { api, ApiError, setToken } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { phoneError } from '../lib/contact';
-import type { MessageResponse, User } from '../lib/types';
-
-/** Mirrors `password::MIN_PASSWORD_LEN`; the server is still the authority. */
-const MIN_PASSWORD_LEN = 10;
+import { MIN_PASSWORD_LEN } from '../lib/password';
+import type { PasswordChanged, User } from '../lib/types';
 
 /**
  * Optional password sign-in, available to any signed-in account.
@@ -31,10 +29,13 @@ function PasswordSection({ hasPassword, onSaved }: { hasPassword: boolean; onSav
     e.preventDefault();
     setBusy(true);
     try {
-      const res = await api<MessageResponse>('/auth/set-password', {
+      const res = await api<PasswordChanged>('/auth/set-password', {
         method: 'POST',
         body: { password },
       });
+      // Changing the password ended every older session, this one included;
+      // the server sends a replacement.
+      setToken(res.token);
       setPassword('');
       setConfirm('');
       await onSaved();

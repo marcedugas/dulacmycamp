@@ -92,6 +92,10 @@ pub struct RateLimits {
     /// Password attempts per address, so one account cannot be ground down
     /// from a rotating pool of addresses.
     pub password_per_email: RateLimiter,
+    /// Password-reset submissions (`/auth/reset-password`) per client IP. The
+    /// per-code attempt cap is what stops guessing a code; this stops one
+    /// network cycling through many addresses' codes.
+    pub reset_per_ip: RateLimiter,
     /// Booking requests submitted per account. Counts only requests that got
     /// past validation, so fixing a form error does not burn the budget.
     pub booking_per_user: RateLimiter,
@@ -127,6 +131,10 @@ impl Default for RateLimits {
             // password budget costs that account holder nothing but the
             // password path, which OTP already backs up.
             password_per_email: RateLimiter::new(5, Duration::from_secs(900)),
+
+            // Roomier than the password budget: a mistyped reset code is an
+            // ordinary event, and a household shares one address at the camp.
+            reset_per_ip: RateLimiter::new(10, Duration::from_secs(900)),
 
             // A real person asks for a stay or two. Three in ten minutes
             // covers "oops, wrong dates" retries; a script gets nothing.

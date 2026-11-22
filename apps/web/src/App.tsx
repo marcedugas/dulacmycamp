@@ -14,6 +14,8 @@ import MyBookings from './routes/MyBookings';
 import Profile from './routes/Profile';
 import Inbox from './routes/Inbox';
 import Login from './routes/Login';
+import ForgotPassword from './routes/ForgotPassword';
+import ChoosePassword from './routes/ChoosePassword';
 import Privacy from './routes/Privacy';
 import Checkout from './routes/Checkout';
 import Journal from './routes/Journal';
@@ -49,6 +51,14 @@ function RequireAuth({ children, adminOnly }: { children: ReactNode; adminOnly?:
 }
 
 export default function App() {
+  const { user } = useAuth();
+
+  // A temporary password has to be replaced before anything else. The API
+  // enforces this on every route; this is the screen that gets them through
+  // it. It replaces the whole app (no nav, no routes), so on success they are
+  // already at the page they were headed for.
+  if (user?.must_change_password) return <ChoosePassword />;
+
   return (
     <div className="flex min-h-screen flex-col">
       <Nav />
@@ -58,6 +68,7 @@ export default function App() {
           <Route path="/calendar" element={<CalendarPage />} />
           <Route path="/forecast" element={<ForecastPage />} />
           <Route path="/login" element={<Login />} />
+          <Route path="/forgot-password" element={<ForgotPassword />} />
           <Route path="/privacy" element={<Privacy />} />
           <Route
             path="/book"
