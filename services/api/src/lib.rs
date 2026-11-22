@@ -4,6 +4,7 @@
 //! control is two-tier (`guest` / `admin`) plus opaque single-use tokens that
 //! let the camp owner approve or deny a stay straight from an email.
 
+pub mod account_delete;
 pub mod admin;
 pub mod auth;
 pub mod bookings;
@@ -309,7 +310,8 @@ pub fn router(state: Shared) -> Router {
         // write the audit log. See the notes above `users::set_temp_password`.
         .route("/users/{id}/temp-password", post(users::set_temp_password))
         .route("/users/{id}/remove-password", post(users::remove_password))
-        .route("/users/{id}", delete(users::remove))
+        .route("/users/{id}", delete(account_delete::delete_user))
+        .route("/users/{id}/delete-preview", get(account_delete::preview))
         // ── calendar annotations ──
         .route(
             "/blackout-dates",

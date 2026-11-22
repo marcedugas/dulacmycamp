@@ -6,15 +6,10 @@ import { Ban, Copy, Crown, KeyRound, RotateCcw, Trash2 } from 'lucide-react';
 import { Button, EmptyState, Modal, Spinner, cx } from '../../components/ui';
 import { api, ApiError } from '../../lib/api';
 import { useUsers } from '../../lib/queries';
+import DeleteAccountDialog from './DeleteAccountDialog';
 import { useAuth } from '../../lib/auth';
 import type { Role, TempPassword, UserWithStats } from '../../lib/types';
 import { ROLE_LABELS, ROLES } from '../../lib/types';
-
-/** Everything a hard delete would destroy. The API refuses the delete unless
- *  this is zero, so it is also what decides whether the button is offered. */
-function historyCount(u: UserWithStats): number {
-  return u.booking_count + u.journal_count + u.message_count;
-}
 
 /** "No password", "Password set", or when it is an admin-issued temporary one,
  *  when it stops working — the thing an admin needs to know before helping
@@ -37,7 +32,7 @@ export default function UsersTab() {
   const queryClient = useQueryClient();
 
   // Blocking is reversible and gets a single click, like the role toggles.
-  // Deleting is not, so it goes through this confirmation first.
+  // Deleting is permanent: a dialog with a counts preview and a typed email.
   const [confirmDelete, setConfirmDelete] = useState<UserWithStats | null>(null);
   // Password tools: which account a confirmation is open for, and the one
   // temporary password currently on screen. The latter lives only in this
@@ -130,17 +125,6 @@ export default function UsersTab() {
     }
   };
 
-  const remove = useMutation({
-    mutationFn: (id: string) => api(`/users/${id}`, { method: 'DELETE' }),
-    onSuccess: () => {
-      toast.success('Account deleted.');
-      setConfirmDelete(null);
-      void queryClient.invalidateQueries({ queryKey: ['users'] });
-    },
-    onError: (err) =>
-      toast.error(err instanceof ApiError ? err.message : 'Could not delete that account.'),
-  });
-
   if (isLoading) {
     return (
       <div className="flex justify-center py-20">
@@ -183,12 +167,13 @@ export default function UsersTab() {
               const isMe = u.id === me?.id;
               const admin = u.role === 'admin';
               const blocked = u.blocked_at !== null;
-              const history = historyCount(u);
               const pw = passwordStatus(u);
-              // Both server-side rules, mirrored here so the button explains
-              // itself instead of only failing when pressed.
+              // Mirrors the server rule so the button explains itself instead
+              // of only failing when pressed.
               const blockable = !admin && !isMe;
-              const deletable = blockable && history === 0;
+              // Delete is not offered at all for yourself, admins or owners:
+              // demote first, then delete.
+              const deletable = blockable && !u.is_owner;
               return (
                 <tr
                   key={u.id}
@@ -375,26 +360,17 @@ export default function UsersTab() {
                           </Button>
                         </>
                       )}
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="text-clay"
-                        // Only ever offered on an account that has nothing to
-                        // lose — anything with history is a job for Block.
-                        disabled={!deletable || remove.isPending}
-                        title={
-                          isMe
-                            ? 'You cannot delete your own account'
-                            : admin
-                              ? 'Remove their admin role first'
-                              : history > 0
-                                ? 'Has booking, journal or message history — use Block instead'
-                                : 'Delete this empty account for good'
-                        }
-                        onClick={() => setConfirmDelete(u)}
-                      >
-                        <Trash2 size={14} /> Delete
-                      </Button>
+                      {deletable && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="text-clay"
+                          title="Permanently delete this account and everything about it"
+                          onClick={() => setConfirmDelete(u)}
+                        >
+                          <Trash2 size={14} /> Delete account…
+                        </Button>
+                      )}
                     </div>
                   </td>
                 </tr>
@@ -493,32 +469,7 @@ export default function UsersTab() {
         </div>
       </Modal>
 
-      <Modal
-        open={confirmDelete !== null}
-        onClose={() => setConfirmDelete(null)}
-        title="Delete this account?"
-      >
-        <div className="space-y-4">
-          <p className="text-sm text-charcoal">
-            <strong>{confirmDelete?.full_name ?? confirmDelete?.email}</strong> has never booked,
-            posted or messaged, so there is nothing to keep. This cannot be undone, though they can
-            sign up again with the same address.
-          </p>
-          <div className="flex justify-end gap-2">
-            <Button variant="ghost" type="button" onClick={() => setConfirmDelete(null)}>
-              Cancel
-            </Button>
-            <Button
-              variant="danger"
-              type="button"
-              disabled={remove.isPending}
-              onClick={() => confirmDelete && remove.mutate(confirmDelete.id)}
-            >
-              {remove.isPending ? 'Deleting…' : 'Delete account'}
-            </Button>
-          </div>
-        </div>
-      </Modal>
+      <DeleteAccountDialog user={confirmDelete} onClose={() => setConfirmDelete(null)} />
     </div>
   );
 }

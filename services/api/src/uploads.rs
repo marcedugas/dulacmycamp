@@ -230,6 +230,28 @@ pub async fn delete_upload_file(state: &Shared, url: &str) {
     }
 }
 
+/// Removes many uploads after their owner's rows are already gone, returning
+/// `(removed, failed)`. A file that is already missing counts as removed. Logs
+/// nothing per file — names can identify a person — so the caller reports counts.
+pub async fn remove_upload_files(state: &Shared, urls: &[String]) -> (usize, usize) {
+    let (mut removed, mut failed) = (0, 0);
+    for url in urls {
+        let name = url.strip_prefix("/uploads/").filter(|n| {
+            !n.is_empty() && !n.contains('/') && !n.contains('\\') && !n.contains("..")
+        });
+        let Some(name) = name else {
+            failed += 1;
+            continue;
+        };
+        match tokio::fs::remove_file(FsPath::new(&state.cfg.upload_dir).join(name)).await {
+            Ok(()) => removed += 1,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => removed += 1,
+            Err(_) => failed += 1,
+        }
+    }
+    (removed, failed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

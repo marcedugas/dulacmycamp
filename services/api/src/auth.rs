@@ -785,8 +785,9 @@ pub async fn reset_password(
     users::write_audit(
         &mut tx,
         user.id,
-        user.id,
+        Some(user.id),
         users::AuditAction::PasswordResetByUser,
+        None,
     )
     .await?;
     let updated = sqlx::query_as::<_, User>(&format!(
